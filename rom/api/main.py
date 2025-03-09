@@ -461,11 +461,17 @@ async def configure_assessment(config: AssessmentConfig):
         "session_id": session_id
     }
 
-
 @app.websocket("/api/assessment/{test_type}")
 async def assessment_websocket(websocket: WebSocket, test_type: str):
-    """WebSocket endpoint for real-time ROM assessment."""
-    if test_type not in test_factories:
+    """WebSocket endpoint for real-time ROM assessment with full configuration support."""
+    # Check if test type is valid
+    is_custom_test = test_type.startswith("custom_")
+    config_manager = ConfigManager()
+    
+    available_tests = list(config_manager.config.get("test_defaults", {}).keys())
+    custom_tests = list(config_manager.config.get("custom_tests", {}).keys())
+    
+    if test_type not in available_tests and test_type not in custom_tests and test_type != "custom":
         await websocket.close(code=1008, reason=f"Unsupported test type: {test_type}")
         return
     
@@ -475,12 +481,98 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
     connection_id = f"conn_{int(time.time())}_{id(websocket)}"
     active_connections[connection_id] = websocket
     
-    # Initialize components
-    pose_detector = PoseDetector()
-    visualizer = PoseVisualizer()
+    # Parse query parameters
+    query_params = dict(websocket.query_params)
     
-    # Create appropriate test instance
-    test_instance = test_factories[test_type](pose_detector, visualizer, {})
+    # Extract configuration options from query parameters
+    config_options = {}
+    
+    # Pose detection options
+    if "model_type" in query_params:
+        config_options["model_type"] = query_params["model_type"]
+    if "det_frequency" in query_params:
+        config_options["det_frequency"] = int(query_params["det_frequency"])
+    if "tracking_mode" in query_params:
+        config_options["tracking_mode"] = query_params["tracking_mode"]
+    if "likelihood_threshold" in query_params:
+        config_options["keypoint_likelihood_threshold"] = float(query_params["likelihood_threshold"])
+    
+    # Assessment options
+    if "ready_time" in query_params:
+        config_options["ready_time_required"] = int(query_params["ready_time"])
+    
+    # Visualization options
+    if "theme" in query_params:
+        config_options["theme"] = query_params["theme"]
+    if "display_mode" in query_params:
+        config_options["display_mode"] = query_params["display_mode"]
+    if "show_trajectory" in query_params:
+        config_options["show_trajectory"] = query_params["show_trajectory"].lower() == "true"
+    if "font_size" in query_params:
+        config_options["font_size"] = float(query_params["font_size"])
+    
+    # Processing options
+    if "filter_type" in query_params:
+        config_options["filter_type"] = query_params["filter_type"]
+    if "interpolate" in query_params:
+        config_options["interpolate"] = query_params["interpolate"].lower() == "true"
+    
+    # Custom body parts and angles
+    body_parts = []
+    if "body_parts" in query_params:
+        body_parts = query_params["body_parts"].split(",")
+        config_options["body_parts"] = body_parts
+    
+    joint_angles = []
+    if "joint_angles" in query_params:
+        # Format: "angle_name:point1,point2,point3;angle_name2:point1,point2,point3"
+        angle_defs = query_params["joint_angles"].split(";")
+        for angle_def in angle_defs:
+            if ":" in angle_def:
+                name, points_str = angle_def.split(":")
+                points = points_str.split(",")
+                if len(points) == 3:
+                    joint_angles.append({
+                        "name": name,
+                        "points": points,
+                        "type": "joint"
+                    })
+        
+        if joint_angles:
+            config_options["joint_angles"] = joint_angles
+    
+    segment_angles = []
+    if "segment_angles" in query_params:
+        # Format: "angle_name:point1,point2,reference;angle_name2:point1,point2,reference"
+        angle_defs = query_params["segment_angles"].split(";")
+        for angle_def in angle_defs:
+            if ":" in angle_def:
+                parts = angle_def.split(":")
+                if len(parts) >= 2:
+                    name = parts[0]
+                    points_str = parts[1]
+                    points = points_str.split(",")
+                    
+                    if len(points) >= 2:
+                        segment_def = {
+                            "name": name,
+                            "points": points[:2],
+                            "type": "segment"
+                        }
+                        
+                        if len(points) > 2:
+                            segment_def["reference"] = points[2]
+                        
+                        segment_angles.append(segment_def)
+        
+        if segment_angles:
+            config_options["segment_angles"] = segment_angles
+    
+    # Primary angle
+    if "primary_angle" in query_params:
+        config_options["primary_angle"] = query_params["primary_angle"]
+    elif joint_angles:
+        config_options["primary_angle"] = joint_angles[0]["name"]
     
     # Initialize HTTP client for LLM API
     async_client = httpx.AsyncClient(timeout=10.0)
@@ -488,6 +580,67 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
     try:
         logger.info(f"Started assessment session: {test_type} ({connection_id})")
         
+        # Initialize visualizer with theme from config
+        theme = config_options.get("theme", "dark")
+        visualizer = EnhancedVisualizer(theme=theme)
+        
+        # Initialize pose detector with configuration
+        pose_detector = PoseDetector(
+            model_type=config_options.get("model_type", "HALPE_26"),
+            det_frequency=config_options.get("det_frequency", 4),
+            tracking_mode=config_options.get("tracking_mode", "sports2d"),
+            keypoint_likelihood_threshold=config_options.get("keypoint_likelihood_threshold", 0.3),
+            average_likelihood_threshold=config_options.get("average_likelihood_threshold", 0.5),
+            keypoint_number_threshold=config_options.get("keypoint_number_threshold", 0.3)
+        )
+        
+        # Create appropriate test instance
+        if test_type == "custom" or body_parts or joint_angles or segment_angles:
+            # Create a fully configurable test
+            from rom.core.configurable_test import ConfigurableROMTest
+            
+            test_instance = ConfigurableROMTest(
+                pose_detector=pose_detector,
+                visualizer=visualizer,
+                config=config_options,
+                test_type="custom",
+                config_manager=config_manager
+            )
+        elif is_custom_test:
+            # Load a saved custom test
+            custom_config = config_manager.get_test_config(test_type)
+            custom_config.update(config_options)
+            
+            from rom.core.configurable_test import ConfigurableROMTest
+            
+            test_instance = ConfigurableROMTest(
+                pose_detector=pose_detector,
+                visualizer=visualizer,
+                config=custom_config,
+                test_type=test_type,
+                config_manager=config_manager
+            )
+        else:
+            # Use standard test from the factories
+            test_config = config_manager.get_test_config(test_type)
+            test_config.update(config_options)
+            
+            if test_type not in test_factories:
+                # Fall back to configurable test for unknown test types
+                from rom.core.configurable_test import ConfigurableROMTest
+                
+                test_instance = ConfigurableROMTest(
+                    pose_detector=pose_detector,
+                    visualizer=visualizer,
+                    config=test_config,
+                    test_type=test_type,
+                    config_manager=config_manager
+                )
+            else:
+                # Use registered test factory
+                test_instance = test_factories[test_type](pose_detector, visualizer, test_config)
+        
+        # Process frames from WebSocket
         while True:
             try:
                 # Receive frame from client
@@ -504,53 +657,99 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
                 if frame is None or frame.size == 0:
                     continue
                 
-                # Process frame with appropriate test
+                # Process frame
                 processed_frame, rom_data = test_instance.process_frame(frame)
                 
                 # Encode processed frame
                 _, buffer = cv2.imencode(".jpg", processed_frame)
                 processed_b64 = base64.b64encode(buffer).decode("utf-8")
                 
-                # Prepare response
+                # Prepare response data
                 response_data = {
                     "image": f"data:image/jpeg;base64,{processed_b64}",
                     "rom_data": rom_data
                 }
                 
-                # If assessment is completed, send data to LLM API
+                # If assessment is completed, send data to LLM API for analysis
                 if rom_data.get("status") == "completed" and "rom" in rom_data:
                     try:
-                        llm_response = await async_client.post(
-                            LLM_API_URL,
-                            json={
-                                "assessment_type": test_type,
-                                "rom_data": rom_data,
-                                "timestamp": datetime.now().isoformat()
+                        # Create comprehensive assessment data
+                        assessment_data = {
+                            "test_type": test_type,
+                            "timestamp": datetime.now().isoformat(),
+                            "rom_data": rom_data,
+                            "config": {
+                                k: v for k, v in config_options.items() 
+                                if k not in ["joint_angles", "segment_angles", "body_parts"]
                             }
-                        )
+                        }
                         
-                        if llm_response.status_code == 200:
-                            response_data["llm_analysis"] = llm_response.json()
-                        else:
-                            logger.warning(f"LLM API returned status code {llm_response.status_code}")
+                        # Generate analysis if analyzer is available
+                        try:
+                            from rom.analysis.assessment_analyzer import AssessmentAnalyzer
+                            analyzer = AssessmentAnalyzer()
+                            
+                            # Get angle history from test instance
+                            angle_history = {}
+                            if hasattr(test_instance, "data_processor"):
+                                for angle_name in test_instance.data_processor.angle_data:
+                                    angle_history[angle_name] = list(test_instance.data_processor.angle_data[angle_name].angle_history)
+                            
+                            analysis_result = analyzer.analyze_assessment(
+                                rom_data,
+                                angle_history
+                            )
+                            
+                            response_data["analysis"] = analysis_result
+                        except ImportError:
+                            logger.warning("AssessmentAnalyzer not available, skipping analysis")
+                        
+                        # Send to LLM API for additional insights
+                        try:
+                            llm_response = await async_client.post(
+                                LLM_API_URL,
+                                json=assessment_data
+                            )
+                            
+                            if llm_response.status_code == 200:
+                                response_data["llm_analysis"] = llm_response.json()
+                            else:
+                                logger.warning(f"LLM API returned status code {llm_response.status_code}")
+                                response_data["llm_analysis"] = {
+                                    "error": "Failed to get analysis from LLM API",
+                                    "status_code": llm_response.status_code
+                                }
+                        except Exception as e:
+                            logger.error(f"Error contacting LLM API: {str(e)}")
                             response_data["llm_analysis"] = {
                                 "error": "Failed to get analysis from LLM API",
-                                "status_code": llm_response.status_code
+                                "message": str(e)
                             }
-                    except Exception as e:
-                        logger.error(f"Error contacting LLM API: {str(e)}")
-                        response_data["llm_analysis"] = {
-                            "error": "Failed to get analysis from LLM API",
-                            "message": str(e)
-                        }
+                        
+                        # Generate visualization report if configured
+                        if visualizer and hasattr(visualizer, "create_report_image"):
+                            report_img = visualizer.create_report_image(
+                                rom_data,
+                                angle_history if 'angle_history' in locals() else {},
+                                include_plots=True
+                            )
+                            
+                            if report_img is not None:
+                                _, report_buffer = cv2.imencode(".jpg", report_img)
+                                report_b64 = base64.b64encode(report_buffer).decode("utf-8")
+                                response_data["report_image"] = f"data:image/jpeg;base64,{report_b64}"
+                    
+                    except Exception as analysis_error:
+                        logger.error(f"Error generating analysis: {str(analysis_error)}")
+                        response_data["analysis_error"] = str(analysis_error)
                 
                 # Send response
                 await websocket.send_text(json.dumps(response_data))
-                
+            
             except WebSocketDisconnect:
                 logger.info(f"Client disconnected: {connection_id}")
                 break
-                
+            
             except Exception as e:
                 logger.error(f"Error processing frame: {str(e)}")
                 try:
@@ -573,13 +772,166 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
             await async_client.aclose()
         except:
             pass
-            
+        
         try:
             await websocket.close()
         except:
             pass
-            
+        
         logger.info(f"Closed assessment session: {test_type} ({connection_id})")
+# @app.websocket("/api/assessment/{test_type}")
+# async def assessment_websocket(websocket: WebSocket, test_type: str):
+#     """WebSocket endpoint for real-time ROM assessment with enhanced visualization."""
+#     if test_type not in test_factories:
+#         await websocket.close(code=1008, reason=f"Unsupported test type: {test_type}")
+#         return
+    
+#     await websocket.accept()
+    
+#     # Generate unique connection ID
+#     connection_id = f"conn_{int(time.time())}_{id(websocket)}"
+#     active_connections[connection_id] = websocket
+    
+#     # Initialize components
+#     pose_detector = PoseDetector()
+#     visualizer = EnhancedVisualizer()
+    
+#     # Get query parameters
+#     query_params = dict(websocket.query_params)
+#     body_parts = query_params.get("body_parts", "").split(",") if "body_parts" in query_params else []
+#     primary_angle = query_params.get("primary_angle")
+    
+#     # Create appropriate test instance based on parameters
+#     if body_parts:
+#         # Create custom test with specified body parts
+#         from rom.core.custom_test_factory import CustomTestFactory
+        
+#         # Create custom joint angle definitions if needed
+#         joint_angles = []
+#         if "angle_points" in query_params:
+#             angle_points = query_params["angle_points"].split(";")
+#             for i, points in enumerate(angle_points):
+#                 point_names = points.split(",")
+#                 if len(point_names) == 3:
+#                     joint_angles.append({
+#                         "name": f"custom_angle_{i}",
+#                         "points": point_names
+#                     })
+        
+#         test_instance = CustomTestFactory.create_test(
+#             body_parts,
+#             joint_angles=joint_angles,
+#             primary_angle=primary_angle or (joint_angles[0]["name"] if joint_angles else None),
+#             pose_detector=pose_detector,
+#             visualizer=visualizer
+#         )
+#     else:
+#         # Create standard test
+#         test_instance = test_factories[test_type](pose_detector, visualizer, {})
+    
+#     # ... (rest of the WebSocket handler implementation remains the same) TODO
+    
+#     # Create appropriate test instance
+#     # test_instance = test_factories[test_type](pose_detector, visualizer, {})
+    
+#     # Initialize HTTP client for LLM API
+#     async_client = httpx.AsyncClient(timeout=10.0)
+    
+#     try:
+#         logger.info(f"Started assessment session: {test_type} ({connection_id})")
+        
+#         while True:
+#             try:
+#                 # Receive frame from client
+#                 data = await websocket.receive_text()
+                
+#                 # Decode base64 image
+#                 if not data.startswith("data:image"):
+#                     continue
+                
+#                 image_data = base64.b64decode(data.split(",")[1])
+#                 nparr = np.frombuffer(image_data, np.uint8)
+#                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                
+#                 if frame is None or frame.size == 0:
+#                     continue
+                
+#                 # Process frame with appropriate test
+#                 processed_frame, rom_data = test_instance.process_frame(frame)
+                
+#                 # Encode processed frame
+#                 _, buffer = cv2.imencode(".jpg", processed_frame)
+#                 processed_b64 = base64.b64encode(buffer).decode("utf-8")
+                
+#                 # Prepare response
+#                 response_data = {
+#                     "image": f"data:image/jpeg;base64,{processed_b64}",
+#                     "rom_data": rom_data
+#                 }
+                
+#                 # If assessment is completed, send data to LLM API
+#                 if rom_data.get("status") == "completed" and "rom" in rom_data:
+#                     try:
+#                         llm_response = await async_client.post(
+#                             LLM_API_URL,
+#                             json={
+#                                 "assessment_type": test_type,
+#                                 "rom_data": rom_data,
+#                                 "timestamp": datetime.now().isoformat()
+#                             }
+#                         )
+                        
+#                         if llm_response.status_code == 200:
+#                             response_data["llm_analysis"] = llm_response.json()
+#                         else:
+#                             logger.warning(f"LLM API returned status code {llm_response.status_code}")
+#                             response_data["llm_analysis"] = {
+#                                 "error": "Failed to get analysis from LLM API",
+#                                 "status_code": llm_response.status_code
+#                             }
+#                     except Exception as e:
+#                         logger.error(f"Error contacting LLM API: {str(e)}")
+#                         response_data["llm_analysis"] = {
+#                             "error": "Failed to get analysis from LLM API",
+#                             "message": str(e)
+#                         }
+                
+#                 # Send response
+#                 await websocket.send_text(json.dumps(response_data))
+                
+#             except WebSocketDisconnect:
+#                 logger.info(f"Client disconnected: {connection_id}")
+#                 break
+                
+#             except Exception as e:
+#                 logger.error(f"Error processing frame: {str(e)}")
+#                 try:
+#                     await websocket.send_text(json.dumps({
+#                         "error": str(e),
+#                         "message": "Error processing frame"
+#                     }))
+#                 except:
+#                     break
+    
+#     except Exception as e:
+#         logger.error(f"Unexpected error in WebSocket handler: {str(e)}")
+    
+#     finally:
+#         # Clean up
+#         if connection_id in active_connections:
+#             del active_connections[connection_id]
+        
+#         try:
+#             await async_client.aclose()
+#         except:
+#             pass
+            
+#         try:
+#             await websocket.close()
+#         except:
+#             pass
+            
+#         logger.info(f"Closed assessment session: {test_type} ({connection_id})")
 
 
 @app.get("/api/health")
@@ -591,6 +943,84 @@ async def health_check():
         "active_connections": len(active_connections)
     }
 
+@app.post("/api/custom_angles")
+async def create_custom_angle_definition(
+    body_parts: List[str] = Body(..., description="List of body part names to track"),
+    joint_angles: Optional[List[Dict[str, Any]]] = Body(None, description="Joint angle definitions"),
+    segment_angles: Optional[List[Dict[str, Any]]] = Body(None, description="Segment angle definitions")
+):
+    """
+    Create a custom angle definition for assessment.
+    
+    This endpoint allows defining custom body parts and angles for ROM assessment.
+    """
+    # Validate body parts
+    valid_parts = set(PoseDetector().keypoint_mapping.keys())
+    for part in body_parts:
+        if part not in valid_parts:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid body part: {part}. Valid parts are: {', '.join(sorted(valid_parts))}"
+            )
+    
+    # Validate joint angles
+    if joint_angles:
+        for angle in joint_angles:
+            if "name" not in angle or "points" not in angle:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Joint angles must have 'name' and 'points' fields"
+                )
+            
+            if len(angle["points"]) != 3:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Joint angle '{angle['name']}' must have exactly 3 points"
+                )
+            
+            for point in angle["points"]:
+                if point not in valid_parts:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid point '{point}' in angle '{angle['name']}'"
+                    )
+    
+    # Validate segment angles
+    if segment_angles:
+        for angle in segment_angles:
+            if "name" not in angle or "points" not in angle:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Segment angles must have 'name' and 'points' fields"
+                )
+            
+            if len(angle["points"]) != 2:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Segment angle '{angle['name']}' must have exactly 2 points"
+                )
+            
+            for point in angle["points"]:
+                if point not in valid_parts:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid point '{point}' in angle '{angle['name']}'"
+                    )
+    
+    # Generate a unique ID for this angle definition
+    definition_id = f"angle_def_{int(time.time())}"
+    
+    # In a production system, you would store this in a database
+    # For now, we'll just return the ID
+    
+    return {
+        "status": "success",
+        "definition_id": definition_id,
+        "body_parts": body_parts,
+        "joint_angles": joint_angles or [],
+        "segment_angles": segment_angles or [],
+        "websocket_url": f"/api/assessment/custom?definition_id={definition_id}"
+    }
 
 @app.post("/api/analyze")
 async def analyze_assessment(data: Dict[str, Any]):

@@ -2,11 +2,10 @@
 import time
 import cv2
 import numpy as np
-from collections import deque
-from typing import Dict, Tuple, Any, List, Optional
+from typing import Dict, Tuple, List, Optional, Any
 
-from rom.core.base import ROMTest, ROMData, JointType, MovementPlane, AssessmentStatus, Point3D, Angle, MathUtils
-
+from rom.core.base import EnhancedROMTest, ROMData, JointType, MovementPlane, AssessmentStatus, Point3D, Angle
+from rom.utils.math_utils import MathUtils
 
 class LowerBackTestType:
     """Types of lower back tests."""
@@ -18,49 +17,9 @@ class LowerBackTestType:
     ROTATION_RIGHT = "rotation_right"  # Rotating right
 
 
-class LowerBackFlexionTest(ROMTest):
-    """Test for lower back flexion (bending forward)."""
-
-    def __init__(self, pose_detector, visualizer, config=None):
-        """
-        Initialize the lower back flexion test.
-        
-        Args:
-            pose_detector: Pose detection system
-            visualizer: Visualization system
-            config: Configuration parameters
-        """
-        config = config or {}
-        # Default configuration values
-        self.default_config = {
-            "ready_time_required": 20,  # Frames to consider position ready
-            "angle_buffer_size": 100,  # Size of the angle history buffer
-            "position_tolerance": 10,  # Degrees of tolerance for position checks
-            "smoothing_window": 5,  # Window size for angle smoothing
-            "key_landmarks": [
-                11,  # Left shoulder
-                12,  # Right shoulder
-                23,  # Left hip
-                24,  # Right hip
-                25,  # Left knee
-                26,  # Right knee
-                27,  # Left ankle
-                28   # Right ankle
-            ]
-        }
-        
-        # Merge provided config with defaults
-        self.config = {**self.default_config, **(config or {})}
-        
-        super().__init__(pose_detector, visualizer, self.config)
-        
-        # Additional instance variables
-        self.ready_time = 0
-        self.angle_buffer = deque(maxlen=self.config["angle_buffer_size"])
-        self.is_ready = False
-        self.start_time = None
-        self.end_time = None
-
+class EnhancedLowerBackFlexionTest(EnhancedROMTest):
+    """Enhanced test for lower back flexion with Sports2D features."""
+    
     def _initialize_rom_data(self) -> ROMData:
         """Initialize ROM data specific to lower back flexion test."""
         return ROMData(
@@ -70,103 +29,58 @@ class LowerBackFlexionTest(ROMTest):
             min_angle=float('inf'),
             max_angle=float('-inf')
         )
-
-    def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """
-        Process a single frame for the lower back flexion test.
+    
+    def _set_default_angles(self):
+        """Set default angles to track for lower back flexion."""
+        self.joint_angles = [
+            "trunk_angle",
+            "left_hip_angle",
+            "right_hip_angle",
+            "left_knee_angle",
+            "right_knee_angle"
+        ]
         
-        Args:
-            frame: Input video frame
-            
-        Returns:
-            Tuple of (processed_frame, rom_data_dict)
-        """
-        # Get frame dimensions
-        h, w, _ = frame.shape
-        frame_shape = (h, w, 3)
-        
-        # Find pose landmarks
-        landmarks = self.pose_detector.find_pose(frame)
-        
-        if not landmarks:
-            self.data.guidance_message = "No pose detected. Please make sure your full body is visible."
-            self.data.status = AssessmentStatus.FAILED
-            # Create a simple frame with message
-            self.visualizer.put_text(frame, self.data.guidance_message, (20, 50), color='red')
-            return frame, self.data.to_dict()
-        
-        # Convert landmarks to dictionary of coordinates
-        landmark_coords = self.pose_detector.get_landmark_coordinates(frame, landmarks)
-        
-        # Check if required landmarks are detected
-        if not all(key in landmark_coords for key in self.config["key_landmarks"]):
-            self.data.guidance_message = "Cannot detect all required body parts. Please step back to show your full body."
-            self.data.status = AssessmentStatus.FAILED
-            self.visualizer.put_text(frame, self.data.guidance_message, (20, 50), color='red')
-            return frame, self.data.to_dict()
-        
-        # Check initial position
-        is_valid_position, guidance_message = self.check_position(landmark_coords, frame_shape)
-        
-        # Update assessment status
-        if self.data.status == AssessmentStatus.NOT_STARTED and is_valid_position:
-            self.data.status = AssessmentStatus.PREPARING
-        
-        # Handle preparation phase
-        if self.data.status == AssessmentStatus.PREPARING:
-            if is_valid_position:
-                self.ready_time += 1
-                if self.ready_time >= self.config["ready_time_required"]:
-                    self.is_ready = True
-                    self.data.status = AssessmentStatus.IN_PROGRESS
-                    self.start_time = time.time()
-                    self.data.guidance_message = "Begin bending forward slowly"
-            else:
-                self.ready_time = 0
-                self.is_ready = False
-                self.data.guidance_message = guidance_message
-        
-        # Calculate angles
-        angles = self.calculate_angles(landmark_coords)
-        
-        # Store lower back angle in ROM data
-        if "trunk_angle" in angles:
-            trunk_angle = angles["trunk_angle"]
-            self.data.current_angle = trunk_angle
-            
-            # Only record angles if assessment is in progress
-            if self.data.status == AssessmentStatus.IN_PROGRESS:
-                self.data.history.append(trunk_angle)
-                self.angle_buffer.append(trunk_angle.value)
-                
-                # Update ROM min/max
-                self.data.update_rom()
-                
-                # Check if max flexion is reached
-                if len(self.data.history) > 30:  # After reasonable number of frames
-                    recent_angles = [a.value for a in self.data.history[-10:]]
-                    if abs(max(recent_angles) - min(recent_angles)) < 3:  # If angle stabilized
-                        self.data.status = AssessmentStatus.COMPLETED
-                        self.end_time = time.time()
-                        self.data.metadata["duration"] = self.end_time - self.start_time
-                        self.data.guidance_message = "Assessment completed"
-        
-        # Store landmark positions in ROM data
+        self.segment_angles = [
+            "trunk_segment",
+            "left_thigh_segment",
+            "right_thigh_segment"
+        ]
+    
+    def _get_required_landmarks(self) -> List[int]:
+        """Get required landmarks for lower back flexion test."""
+        return [
+            11,  # Left shoulder
+            12,  # Right shoulder
+            23,  # Left hip
+            24,  # Right hip
+            25,  # Left knee
+            26   # Right knee
+        ]
+    
+    def _get_movement_guidance(self) -> str:
+        """Get guidance for lower back flexion."""
+        return "Begin bending forward slowly"
+    
+    def _get_movement_plane(self) -> MovementPlane:
+        """Get movement plane for lower back flexion."""
+        return MovementPlane.SAGITTAL
+    
+    def _is_primary_angle(self, angle_name: str) -> bool:
+        """Check if angle is primary for lower back flexion."""
+        return angle_name == "trunk_angle"
+    
+    def _update_landmarks(self, landmarks: Dict[int, Tuple[float, float, float]]):
+        """Update ROM data with landmark positions."""
         self.data.landmarks = {
-            "left_shoulder": Point3D.from_tuple(landmark_coords[11]),
-            "right_shoulder": Point3D.from_tuple(landmark_coords[12]),
-            "left_hip": Point3D.from_tuple(landmark_coords[23]),
-            "right_hip": Point3D.from_tuple(landmark_coords[24]),
-            "left_knee": Point3D.from_tuple(landmark_coords[25]),
-            "right_knee": Point3D.from_tuple(landmark_coords[26])
+            "left_shoulder": Point3D.from_tuple(landmarks[11]),
+            "right_shoulder": Point3D.from_tuple(landmarks[12]),
+            "left_hip": Point3D.from_tuple(landmarks[23]),
+            "right_hip": Point3D.from_tuple(landmarks[24]),
+            "left_knee": Point3D.from_tuple(landmarks[25]),
+            "right_knee": Point3D.from_tuple(landmarks[26])
         }
-        
-        # Visualize assessment
-        processed_frame = self.visualize_assessment(frame, self.data)
-        
-        return processed_frame, self.data.to_dict()
-
-    def calculate_angles(self, landmarks: Dict[int, Tuple[float, float, float]]) -> Dict[str, Angle]:
+    
+    def calculate_angles(self, landmarks: Dict[int, Tuple[float, float, float]]) -> Tuple[Dict[str, float], Dict[str, float]]:
         """
         Calculate angles from landmarks.
         
@@ -174,50 +88,48 @@ class LowerBackFlexionTest(ROMTest):
             landmarks: Dictionary of landmark coordinates
             
         Returns:
-            Dictionary of calculated angles
+            Tuple of (joint_angles, segment_angles) dictionaries
         """
-        angles = {}
+        joint_angles = {}
+        segment_angles = {}
         
         # Calculate trunk angle (between shoulders, hips, and knees)
-        if all(key in landmarks for key in [11, 12, 23, 24, 25, 26]):
+        if all(idx in landmarks for idx in [11, 12, 23, 24, 25, 26]):
             # Use midpoints for more stability
-            shoulder_midpoint = (
-                (landmarks[11][0] + landmarks[12][0]) / 2,
-                (landmarks[11][1] + landmarks[12][1]) / 2,
-                (landmarks[11][2] + landmarks[12][2]) / 2
-            )
-            hip_midpoint = (
-                (landmarks[23][0] + landmarks[24][0]) / 2,
-                (landmarks[23][1] + landmarks[24][1]) / 2,
-                (landmarks[23][2] + landmarks[24][2]) / 2
-            )
-            knee_midpoint = (
-                (landmarks[25][0] + landmarks[26][0]) / 2,
-                (landmarks[25][1] + landmarks[26][1]) / 2,
-                (landmarks[25][2] + landmarks[26][2]) / 2
-            )
+            shoulder_midpoint = MathUtils.get_midpoint(landmarks[11], landmarks[12])
+            hip_midpoint = MathUtils.get_midpoint(landmarks[23], landmarks[24])
+            knee_midpoint = MathUtils.get_midpoint(landmarks[25], landmarks[26])
             
-            trunk_angle_value = MathUtils.calculate_angle(shoulder_midpoint, hip_midpoint, knee_midpoint)
+            # Calculate trunk angle (joint angle)
+            trunk_angle = MathUtils.calculate_angle(shoulder_midpoint, hip_midpoint, knee_midpoint)
+            joint_angles["trunk_angle"] = trunk_angle
             
-            # Create Angle object
-            angles["trunk_angle"] = Angle(
-                value=trunk_angle_value,
-                joint_type=JointType.LOWER_BACK,
-                plane=MovementPlane.SAGITTAL,
-                timestamp=time.time()
-            )
+            # Calculate hip angles
+            left_hip_angle = MathUtils.calculate_angle(landmarks[11], landmarks[23], landmarks[25])
+            right_hip_angle = MathUtils.calculate_angle(landmarks[12], landmarks[24], landmarks[26])
             
-            # Calculate hip angle (hip flexion)
-            hip_angle_value = MathUtils.calculate_angle(shoulder_midpoint, hip_midpoint, knee_midpoint)
-            angles["hip_angle"] = Angle(
-                value=hip_angle_value,
-                joint_type=JointType.HIP,
-                plane=MovementPlane.SAGITTAL,
-                timestamp=time.time()
-            )
+            joint_angles["left_hip_angle"] = left_hip_angle
+            joint_angles["right_hip_angle"] = right_hip_angle
+            
+            # Calculate knee angles
+            if 27 in landmarks and 28 in landmarks:  # If ankle landmarks are available
+                left_knee_angle = MathUtils.calculate_angle(landmarks[23], landmarks[25], landmarks[27])
+                right_knee_angle = MathUtils.calculate_angle(landmarks[24], landmarks[26], landmarks[28])
+                
+                joint_angles["left_knee_angle"] = left_knee_angle
+                joint_angles["right_knee_angle"] = right_knee_angle
+            
+            # Calculate segment angles (with horizontal)
+            trunk_segment = MathUtils.calculate_segment_angle(hip_midpoint, shoulder_midpoint)
+            left_thigh_segment = MathUtils.calculate_segment_angle(landmarks[23], landmarks[25])
+            right_thigh_segment = MathUtils.calculate_segment_angle(landmarks[24], landmarks[26])
+            
+            segment_angles["trunk_segment"] = trunk_segment
+            segment_angles["left_thigh_segment"] = left_thigh_segment
+            segment_angles["right_thigh_segment"] = right_thigh_segment
         
-        return angles
-
+        return joint_angles, segment_angles
+    
     def check_position(self, landmarks: Dict[int, Tuple[float, float, float]], frame_shape: Tuple[int, int, int]) -> Tuple[bool, str]:
         """
         Check if the person is in the correct position for the test.
@@ -234,9 +146,9 @@ class LowerBackFlexionTest(ROMTest):
         is_valid = True
         
         # Check if all required landmarks are detected
-        for point in self.config["key_landmarks"]:
-            if point not in landmarks:
-                return False, "Cannot detect full body. Please step back."
+        required_landmarks = self._get_required_landmarks()
+        if not all(landmark_id in landmarks for landmark_id in required_landmarks):
+            return False, "Cannot detect required body parts. Please step back to show your full body."
         
         # Check if person is facing the camera (using shoulder width)
         left_shoulder = landmarks[11]
@@ -247,11 +159,18 @@ class LowerBackFlexionTest(ROMTest):
             is_valid = False
         
         # Check if person is too close or too far
-        body_height = abs(landmarks[11][1] - landmarks[27][1])  # Shoulder to ankle height
-        if body_height < h * 0.5:
+        left_hip = landmarks[23]
+        right_hip = landmarks[24]
+        
+        # Estimate torso height
+        torso_height = 0
+        if 11 in landmarks and 23 in landmarks:
+            torso_height = abs(landmarks[11][1] - landmarks[23][1])
+        
+        if torso_height < h * 0.2:
             messages.append("Step closer to the camera")
             is_valid = False
-        elif body_height > h * 0.9:
+        elif torso_height > h * 0.4:
             messages.append("Step back from the camera")
             is_valid = False
         
@@ -265,11 +184,9 @@ class LowerBackFlexionTest(ROMTest):
             is_valid = False
         
         # Check if person is standing straight
-        left_hip = landmarks[23]
-        right_hip = landmarks[24]
         hip_shoulder_angle = MathUtils.calculate_angle(
             left_shoulder,
-            ((left_hip[0] + right_hip[0]) / 2, (left_hip[1] + right_hip[1]) / 2, 0),
+            MathUtils.get_midpoint(left_hip, right_hip),
             right_shoulder
         )
         
@@ -284,10 +201,10 @@ class LowerBackFlexionTest(ROMTest):
             guidance_message = "Good starting position. Hold still."
         
         return is_valid, guidance_message
-
+    
     def visualize_assessment(self, frame: np.ndarray, rom_data: ROMData) -> np.ndarray:
         """
-        Visualize the assessment on the frame.
+        Visualize the assessment on the frame with enhanced visualization.
         
         Args:
             frame: Input video frame
@@ -298,124 +215,288 @@ class LowerBackFlexionTest(ROMTest):
         """
         h, w, _ = frame.shape
         
-        # Draw key landmarks if available
-        if rom_data.landmarks:
-            if "left_shoulder" in rom_data.landmarks and "right_shoulder" in rom_data.landmarks:
-                self.visualizer.draw_landmark_point(frame, 
-                                                  int(rom_data.landmarks["left_shoulder"].x), 
-                                                  int(rom_data.landmarks["left_shoulder"].y), 
-                                                  'blue')
-                self.visualizer.draw_landmark_point(frame, 
-                                                  int(rom_data.landmarks["right_shoulder"].x), 
-                                                  int(rom_data.landmarks["right_shoulder"].y), 
-                                                  'blue')
+        # Create a copy of the frame for visualization
+        vis_frame = frame.copy()
+        
+        # Draw only relevant landmarks and connections for this test
+        if self.visualizer and rom_data.landmarks:
+            # Get landmark coordinates
+            landmarks_to_draw = {}
+            for name, point in rom_data.landmarks.items():
+                landmarks_to_draw[name] = (int(point.x), int(point.y))
             
-            if "left_hip" in rom_data.landmarks and "right_hip" in rom_data.landmarks:
-                self.visualizer.draw_landmark_point(frame, 
-                                                  int(rom_data.landmarks["left_hip"].x), 
-                                                  int(rom_data.landmarks["left_hip"].y), 
-                                                  'green')
-                self.visualizer.draw_landmark_point(frame, 
-                                                  int(rom_data.landmarks["right_hip"].x), 
-                                                  int(rom_data.landmarks["right_hip"].y), 
-                                                  'green')
+            # Draw selective connections - only draw what's needed for this test
+            relevant_connections = [
+                # Draw torso
+                ("left_shoulder", "left_hip"),
+                ("right_shoulder", "right_hip"),
+                ("left_shoulder", "right_shoulder"),
+                ("left_hip", "right_hip"),
+                # Draw legs
+                ("left_hip", "left_knee"),
+                ("right_hip", "right_knee")
+            ]
+            
+            # Draw connections
+            for start_name, end_name in relevant_connections:
+                if start_name in landmarks_to_draw and end_name in landmarks_to_draw:
+                    self.visualizer.draw_connection(
+                        vis_frame,
+                        landmarks_to_draw[start_name],
+                        landmarks_to_draw[end_name],
+                        color="blue" if "shoulder" in start_name or "shoulder" in end_name else "green"
+                    )
+            
+            # Draw landmarks
+            for name, point in landmarks_to_draw.items():
+                highlight = "shoulder" in name.lower() or "hip" in name.lower()
+                self.visualizer.draw_landmark_point(
+                    vis_frame, 
+                    point[0], 
+                    point[1], 
+                    color="yellow" if highlight else "white",
+                    size=8 if highlight else 6,
+                    highlight=highlight
+                )
+            
+            # Draw trunk angle
+            if all(k in landmarks_to_draw for k in ["left_shoulder", "left_hip", "left_knee", 
+                                                "right_shoulder", "right_hip", "right_knee"]):
+                # Calculate midpoints
+                shoulder_midpoint = (
+                    (landmarks_to_draw["left_shoulder"][0] + landmarks_to_draw["right_shoulder"][0]) // 2,
+                    (landmarks_to_draw["left_shoulder"][1] + landmarks_to_draw["right_shoulder"][1]) // 2
+                )
                 
-            if "left_knee" in rom_data.landmarks and "right_knee" in rom_data.landmarks:
-                self.visualizer.draw_landmark_point(frame, 
-                                                  int(rom_data.landmarks["left_knee"].x), 
-                                                  int(rom_data.landmarks["left_knee"].y), 
-                                                  'red')
-                self.visualizer.draw_landmark_point(frame, 
-                                                  int(rom_data.landmarks["right_knee"].x), 
-                                                  int(rom_data.landmarks["right_knee"].y), 
-                                                  'red')
-            
-            # Draw connecting lines for trunk
-            if all(k in rom_data.landmarks for k in ["left_shoulder", "left_hip", "left_knee"]):
-                # Left side
-                self.visualizer.draw_connection(
-                    frame,
-                    (int(rom_data.landmarks["left_shoulder"].x), int(rom_data.landmarks["left_shoulder"].y)),
-                    (int(rom_data.landmarks["left_hip"].x), int(rom_data.landmarks["left_hip"].y)),
-                    'white'
-                )
-                self.visualizer.draw_connection(
-                    frame,
-                    (int(rom_data.landmarks["left_hip"].x), int(rom_data.landmarks["left_hip"].y)),
-                    (int(rom_data.landmarks["left_knee"].x), int(rom_data.landmarks["left_knee"].y)),
-                    'white'
+                hip_midpoint = (
+                    (landmarks_to_draw["left_hip"][0] + landmarks_to_draw["right_hip"][0]) // 2,
+                    (landmarks_to_draw["left_hip"][1] + landmarks_to_draw["right_hip"][1]) // 2
                 )
                 
-            if all(k in rom_data.landmarks for k in ["right_shoulder", "right_hip", "right_knee"]):
-                # Right side
-                self.visualizer.draw_connection(
-                    frame,
-                    (int(rom_data.landmarks["right_shoulder"].x), int(rom_data.landmarks["right_shoulder"].y)),
-                    (int(rom_data.landmarks["right_hip"].x), int(rom_data.landmarks["right_hip"].y)),
-                    'white'
+                knee_midpoint = (
+                    (landmarks_to_draw["left_knee"][0] + landmarks_to_draw["right_knee"][0]) // 2,
+                    (landmarks_to_draw["left_knee"][1] + landmarks_to_draw["right_knee"][1]) // 2
                 )
-                self.visualizer.draw_connection(
-                    frame,
-                    (int(rom_data.landmarks["right_hip"].x), int(rom_data.landmarks["right_hip"].y)),
-                    (int(rom_data.landmarks["right_knee"].x), int(rom_data.landmarks["right_knee"].y)),
-                    'white'
+                
+                # Draw midpoints
+                self.visualizer.draw_landmark_point(vis_frame, hip_midpoint[0], hip_midpoint[1], color="primary", size=10)
+                self.visualizer.draw_landmark_point(vis_frame, shoulder_midpoint[0], shoulder_midpoint[1], color="primary", size=10)
+                self.visualizer.draw_landmark_point(vis_frame, knee_midpoint[0], knee_midpoint[1], color="primary", size=10)
+                
+                # Draw angle visualization
+                if rom_data.current_angle:
+                    self.visualizer.draw_angle(
+                        vis_frame,
+                        shoulder_midpoint,
+                        hip_midpoint,
+                        knee_midpoint,
+                        rom_data.current_angle.value,
+                        color="primary",
+                        thickness=3,
+                        radius=40
+                    )
+        
+        # Draw ROM information panel
+        self.visualizer.draw_assessment_info(
+            vis_frame,
+            rom_data.status.value,
+            rom_data.test_type,
+            rom_data.current_angle.value if rom_data.current_angle else None,
+            rom_data.min_angle,
+            rom_data.max_angle,
+            position="top_right"
+        )
+        
+        # Draw status and guidance overlay
+        if rom_data.status == AssessmentStatus.PREPARING:
+            # Draw position guide with progress
+            self.visualizer.draw_position_guide(
+                vis_frame,
+                self.is_ready,
+                rom_data.guidance_message,
+                (self.ready_time / self.config["ready_time_required"]) * 100
+            )
+        else:
+            # Draw guidance overlay
+            self.visualizer.draw_guidance_overlay(vis_frame, rom_data.guidance_message)
+        
+        # Add ROM gauge if ROM is being measured
+        if rom_data.status == AssessmentStatus.IN_PROGRESS or rom_data.status == AssessmentStatus.COMPLETED:
+            if rom_data.rom:
+                # Get normal ROM value for this test
+                normal_rom = 60  # Default for lower back flexion
+                if rom_data.test_type == "extension":
+                    normal_rom = 25
+                elif "lateral_flexion" in rom_data.test_type:
+                    normal_rom = 25
+                elif "rotation" in rom_data.test_type:
+                    normal_rom = 45
+                
+                # Draw ROM gauge
+                self.visualizer.draw_rom_gauge(
+                    vis_frame,
+                    rom_data.rom,
+                    normal_rom,
+                    position=(20, h - 80),
+                    width=w - 40,
+                    height=20
                 )
         
-        # Draw current angle if available
-        if rom_data.current_angle:
-            angle_text = f"Current angle: {rom_data.current_angle.value:.1f}°"
-            self.visualizer.put_text(frame, angle_text, (20, 50), 'white')
+        # Add trajectory visualization if history is available
+        if hasattr(self, 'motion_visualizer') and rom_data.history:
+            # Update motion visualizer
+            if not hasattr(self, '_last_updated_angle') or self._last_updated_angle != rom_data.current_angle:
+                self._last_updated_angle = rom_data.current_angle
+                if rom_data.current_angle:
+                    self.motion_visualizer.update_angle("trunk_angle", rom_data.current_angle.value)
             
-            if rom_data.min_angle is not None and rom_data.max_angle is not None:
-                rom_text = f"ROM: {rom_data.min_angle:.1f}° - {rom_data.max_angle:.1f}° = {rom_data.rom:.1f}°"
-                self.visualizer.put_text(frame, rom_text, (20, 80), 'white')
+            # Create trajectory visualization
+            traj_img = self.motion_visualizer.create_trajectory_visualization(
+                selected_angles=["trunk_angle"],
+                min_y=rom_data.min_angle - 10 if rom_data.min_angle != float('inf') else None,
+                max_y=rom_data.max_angle + 10 if rom_data.max_angle != float('-inf') else None
+            )
+            
+            # Place trajectory visualization at bottom of frame
+            if traj_img is not None:
+                traj_height, traj_width = traj_img.shape[:2]
+                traj_x = (w - traj_width) // 2
+                traj_y = h - traj_height - 120  # Above the guidance overlay
+                
+                vis_frame[traj_y:traj_y+traj_height, traj_x:traj_x+traj_width] = traj_img
         
-        # Draw status and guidance
-        status_text = f"Status: {rom_data.status.value.replace('_', ' ').title()}"
-        self.visualizer.put_text(frame, status_text, (20, 110), 'green')
+        return vis_frame
+    # def visualize_assessment(self, frame: np.ndarray, rom_data: ROMData) -> np.ndarray:
+    #     """
+    #     Visualize the assessment on the frame.
         
-        # Draw guidance overlay at the bottom
-        self._draw_guidance_overlay(frame, rom_data)
+    #     Args:
+    #         frame: Input video frame
+    #         rom_data: Current ROM data
+            
+    #     Returns:
+    #         Frame with visualization
+    #     """
+    #     h, w, _ = frame.shape
         
-        return frame
+    #     # Draw relevant landmarks and connections based on test
+    #     if self.visualizer and rom_data.landmarks:
+    #         # Get landmark coordinates
+    #         landmarks_to_draw = {}
+    #         for name, point in rom_data.landmarks.items():
+    #             landmarks_to_draw[name] = (int(point.x), int(point.y))
+            
+    #         # Draw connections for trunk
+    #         if all(k in landmarks_to_draw for k in ["left_shoulder", "left_hip", "left_knee"]):
+    #             self.visualizer.draw_connection(
+    #                 frame,
+    #                 landmarks_to_draw["left_shoulder"],
+    #                 landmarks_to_draw["left_hip"],
+    #                 color="blue"
+    #             )
+    #             self.visualizer.draw_connection(
+    #                 frame,
+    #                 landmarks_to_draw["left_hip"],
+    #                 landmarks_to_draw["left_knee"],
+    #                 color="blue"
+    #             )
+            
+    #         if all(k in landmarks_to_draw for k in ["right_shoulder", "right_hip", "right_knee"]):
+    #             self.visualizer.draw_connection(
+    #                 frame,
+    #                 landmarks_to_draw["right_shoulder"],
+    #                 landmarks_to_draw["right_hip"],
+    #                 color="blue"
+    #             )
+    #             self.visualizer.draw_connection(
+    #                 frame,
+    #                 landmarks_to_draw["right_hip"],
+    #                 landmarks_to_draw["right_knee"],
+    #                 color="blue"
+    #             )
+            
+    #         # Draw landmarks
+    #         for name, point in landmarks_to_draw.items():
+    #             self.visualizer.draw_landmark_point(frame, point[0], point[1], color="green")
+            
+    #         # Draw trunk angle if available
+    #         if "left_hip" in landmarks_to_draw and "right_hip" in landmarks_to_draw and \
+    #             "left_shoulder" in landmarks_to_draw and "right_shoulder" in landmarks_to_draw:
+    #             hip_midpoint = (
+    #                 (landmarks_to_draw["left_hip"][0] + landmarks_to_draw["right_hip"][0]) // 2,
+    #                 (landmarks_to_draw["left_hip"][1] + landmarks_to_draw["right_hip"][1]) // 2
+    #             )
+    #             shoulder_midpoint = (
+    #                 (landmarks_to_draw["left_shoulder"][0] + landmarks_to_draw["right_shoulder"][0]) // 2,
+    #                 (landmarks_to_draw["left_shoulder"][1] + landmarks_to_draw["right_shoulder"][1]) // 2
+    #             )
+                
+    #             # Draw midpoints
+    #             self.visualizer.draw_landmark_point(frame, hip_midpoint[0], hip_midpoint[1], color="yellow", size=6)
+    #             self.visualizer.draw_landmark_point(frame, shoulder_midpoint[0], shoulder_midpoint[1], color="yellow", size=6)
+                
+    #             # Draw trunk line
+    #             self.visualizer.draw_connection(frame, shoulder_midpoint, hip_midpoint, color="yellow", thickness=3)
+                
+    #             # Draw angle value
+    #             if rom_data.current_angle:
+    #                 angle_text = f"{rom_data.current_angle.value:.1f}°"
+    #                 text_position = (hip_midpoint[0] + 20, hip_midpoint[1])
+    #                 self.visualizer.put_text(frame, angle_text, text_position, color="white")
+        
+    #     # Draw status and guidance overlay
+    #     self._draw_status_overlay(frame, rom_data)
+        
+    #     return frame
     
-    def _draw_guidance_overlay(self, frame: np.ndarray, rom_data: ROMData) -> None:
+    def _draw_status_overlay(self, frame: np.ndarray, rom_data: ROMData) -> None:
         """
-        Draw guidance overlay at the bottom of the frame.
+        Draw status overlay at the bottom of the frame.
         
         Args:
             frame: Input video frame
             rom_data: Current ROM data
         """
+        if not self.visualizer:
+            return
+            
         h, w, _ = frame.shape
         
-        # Create semi-transparent overlay
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, h - 100), (w, h), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+        # Draw ROM information
+        if rom_data.current_angle:
+            # Show current angle
+            self.visualizer.put_text(
+                frame,
+                f"Current: {rom_data.current_angle.value:.1f}°",
+                (20, 30),
+                color="white"
+            )
+            
+            # Show ROM if available
+            if rom_data.min_angle is not None and rom_data.max_angle is not None:
+                self.visualizer.put_text(
+                    frame,
+                    f"ROM: {rom_data.rom:.1f}° (min: {rom_data.min_angle:.1f}°, max: {rom_data.max_angle:.1f}°)",
+                    (20, 60),
+                    color="white"
+                )
         
-        # Draw guidance text
-        self.visualizer.put_text(
-            frame,
-            f"Guidance: {rom_data.guidance_message}",
-            (20, h - 60),
-            color='white'
-        )
+        # Draw status
+        status_text = f"Status: {rom_data.status.value.replace('_', ' ').title()}"
+        self.visualizer.put_text(frame, status_text, (20, 90), color="green")
         
-        # Draw progress bar if in preparing phase
+        # Draw guidance overlay
+        self.visualizer.draw_guidance_overlay(frame, rom_data.guidance_message)
+        
+        # Draw preparation progress bar if preparing
         if rom_data.status == AssessmentStatus.PREPARING:
             progress = (self.ready_time / self.config["ready_time_required"]) * (w - 40)
-            cv2.rectangle(frame, (20, h - 30), (w - 20, h - 20), (255, 255, 255), 2)
-            cv2.rectangle(frame, (20, h - 30), (int(20 + progress), h - 20), (0, 255, 0), -1)
-        
-        # Draw ROM progress if in assessment phase
-        if rom_data.status == AssessmentStatus.IN_PROGRESS and rom_data.min_angle is not None and rom_data.max_angle is not None:
-            progress_text = f"Bending progress: {rom_data.rom:.1f}°"
-            self.visualizer.put_text(frame, progress_text, (20, h - 30), color='white')
+            cv2.rectangle(frame, (20, h - 30), (w - 20, h - 10), (255, 255, 255), 2)
+            cv2.rectangle(frame, (20, h - 30), (int(20 + progress), h - 10), (0, 255, 0), -1)
 
 
-class LowerBackExtensionTest(LowerBackFlexionTest):
-    """Test for lower back extension (bending backward)."""
+class EnhancedLowerBackExtensionTest(EnhancedLowerBackFlexionTest):
+    """Enhanced test for lower back extension with Sports2D features."""
     
     def _initialize_rom_data(self) -> ROMData:
         """Initialize ROM data specific to lower back extension test."""
@@ -426,18 +507,16 @@ class LowerBackExtensionTest(LowerBackFlexionTest):
             min_angle=float('inf'),
             max_angle=float('-inf')
         )
-        
-    def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process frame for extension test with modified guidance."""
-        if self.data.status == AssessmentStatus.IN_PROGRESS:
-            self.data.guidance_message = "Slowly bend backward as far as comfortable"
-        return super().process_frame(frame)
-        
-
-class LowerBackLateralFlexionTest(LowerBackFlexionTest):
-    """Test for lower back lateral flexion (side bending)."""
     
-    def __init__(self, pose_detector, visualizer, config=None, side="left"):
+    def _get_movement_guidance(self) -> str:
+        """Get guidance for lower back extension."""
+        return "Slowly bend backward as far as comfortable"
+
+
+class EnhancedLowerBackLateralFlexionTest(EnhancedLowerBackFlexionTest):
+    """Enhanced test for lower back lateral flexion with Sports2D features."""
+    
+    def __init__(self, pose_detector=None, visualizer=None, config=None, side="left"):
         """
         Initialize lateral flexion test with specified side.
         
@@ -450,8 +529,9 @@ class LowerBackLateralFlexionTest(LowerBackFlexionTest):
         self.side = side.lower()
         if self.side not in ["left", "right"]:
             raise ValueError("Side must be 'left' or 'right'")
-        super().__init__(pose_detector, visualizer, config)
         
+        super().__init__(pose_detector, visualizer, config)
+    
     def _initialize_rom_data(self) -> ROMData:
         """Initialize ROM data specific to lateral flexion test."""
         test_type = (LowerBackTestType.LATERAL_FLEXION_LEFT if self.side == "left" 
@@ -463,8 +543,32 @@ class LowerBackLateralFlexionTest(LowerBackFlexionTest):
             min_angle=float('inf'),
             max_angle=float('-inf')
         )
+    
+    def _set_default_angles(self):
+        """Set default angles to track for lateral flexion."""
+        self.joint_angles = [
+            "lateral_trunk_angle",
+            f"{self.side}_shoulder_hip_angle",
+        ]
         
-    def calculate_angles(self, landmarks: Dict[int, Tuple[float, float, float]]) -> Dict[str, Angle]:
+        self.segment_angles = [
+            "trunk_segment_lateral",
+            f"{self.side}_side_segment"
+        ]
+    
+    def _get_movement_guidance(self) -> str:
+        """Get guidance for lateral flexion."""
+        return f"Slowly bend to the {self.side} side"
+    
+    def _get_movement_plane(self) -> MovementPlane:
+        """Get movement plane for lateral flexion."""
+        return MovementPlane.FRONTAL
+    
+    def _is_primary_angle(self, angle_name: str) -> bool:
+        """Check if angle is primary for lateral flexion."""
+        return angle_name == "lateral_trunk_angle"
+    
+    def calculate_angles(self, landmarks: Dict[int, Tuple[float, float, float]]) -> Tuple[Dict[str, float], Dict[str, float]]:
         """
         Calculate angles for lateral flexion.
         
@@ -472,40 +576,76 @@ class LowerBackLateralFlexionTest(LowerBackFlexionTest):
             landmarks: Dictionary of landmark coordinates
             
         Returns:
-            Dictionary of calculated angles
+            Tuple of (joint_angles, segment_angles) dictionaries
         """
-        angles = {}
+        joint_angles = {}
+        segment_angles = {}
         
-        # Check if all required landmarks are available
-        if all(key in landmarks for key in [11, 12, 23, 24]):
-            # Calculate angle in frontal plane
+        # Check if key landmarks are available
+        if all(idx in landmarks for idx in [11, 12, 23, 24]):
+            # Get relevant landmarks
+            left_shoulder = landmarks[11]
+            right_shoulder = landmarks[12]
+            left_hip = landmarks[23]
+            right_hip = landmarks[24]
+            
+            # Calculate angle differently based on side
             if self.side == "left":
                 # For left lateral flexion, use right landmarks as reference
-                lateral_angle_value = MathUtils.calculate_angle(
-                    landmarks[12],  # Right shoulder
-                    landmarks[24],  # Right hip
-                    (landmarks[24][0], landmarks[24][1] + 100, landmarks[24][2])  # Point below right hip
+                lateral_angle = MathUtils.calculate_angle(
+                    right_shoulder,
+                    right_hip,
+                    (right_hip[0], right_hip[1] + 100, right_hip[2])  # Point below right hip
+                )
+                shoulder_hip_angle = MathUtils.calculate_angle(
+                    left_shoulder,
+                    left_hip,
+                    (left_hip[0], left_hip[1] + 100, left_hip[2])
+                )
+                side_segment = MathUtils.calculate_segment_angle(
+                    left_hip, 
+                    left_shoulder, 
+                    "vertical"
                 )
             else:
                 # For right lateral flexion, use left landmarks as reference
-                lateral_angle_value = MathUtils.calculate_angle(
-                    landmarks[11],  # Left shoulder
-                    landmarks[23],  # Left hip
-                    (landmarks[23][0], landmarks[23][1] + 100, landmarks[23][2])  # Point below left hip
+                lateral_angle = MathUtils.calculate_angle(
+                    left_shoulder,
+                    left_hip,
+                    (left_hip[0], left_hip[1] + 100, left_hip[2])  # Point below left hip
+                )
+                shoulder_hip_angle = MathUtils.calculate_angle(
+                    right_shoulder,
+                    right_hip,
+                    (right_hip[0], right_hip[1] + 100, right_hip[2])
+                )
+                side_segment = MathUtils.calculate_segment_angle(
+                    right_hip, 
+                    right_shoulder, 
+                    "vertical"
                 )
             
-            # Subtract from 180 to get the inclination angle
-            lateral_angle_value = 180 - lateral_angle_value
+            # Adjust angles to get lateral flexion angle
+            lateral_angle = 180 - lateral_angle
             
-            angles["lateral_angle"] = Angle(
-                value=lateral_angle_value,
-                joint_type=JointType.LOWER_BACK,
-                plane=MovementPlane.FRONTAL,
-                timestamp=time.time()
+            joint_angles["lateral_trunk_angle"] = lateral_angle
+            joint_angles[f"{self.side}_shoulder_hip_angle"] = shoulder_hip_angle
+            
+            # Calculate segment angles
+            shoulder_midpoint = MathUtils.get_midpoint(left_shoulder, right_shoulder)
+            hip_midpoint = MathUtils.get_midpoint(left_hip, right_hip)
+            
+            trunk_segment_lateral = MathUtils.calculate_segment_angle(
+                hip_midpoint, 
+                shoulder_midpoint, 
+                "vertical"
             )
             
-        return angles
+            segment_angles["trunk_segment_lateral"] = trunk_segment_lateral
+            segment_angles[f"{self.side}_side_segment"] = side_segment
         
+        return joint_angles, segment_angles
+    
     def check_position(self, landmarks: Dict[int, Tuple[float, float, float]], frame_shape: Tuple[int, int, int]) -> Tuple[bool, str]:
         """
         Check if the person is in the correct position for lateral flexion.
@@ -531,18 +671,12 @@ class LowerBackLateralFlexionTest(LowerBackFlexionTest):
             return False, f"Turn to face {'right' if self.side == 'left' else 'left'} side"
         
         return True, f"Good position for {self.side} side bend"
-    
-    def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process frame with modified guidance for lateral flexion."""
-        if self.data.status == AssessmentStatus.IN_PROGRESS:
-            self.data.guidance_message = f"Slowly bend to the {self.side} side"
-        return super().process_frame(frame)
 
 
-class LowerBackRotationTest(LowerBackFlexionTest):
-    """Test for lower back rotation (twisting)."""
+class EnhancedLowerBackRotationTest(EnhancedLowerBackFlexionTest):
+    """Enhanced test for lower back rotation with Sports2D features."""
     
-    def __init__(self, pose_detector, visualizer, config=None, side="left"):
+    def __init__(self, pose_detector=None, visualizer=None, config=None, side="left"):
         """
         Initialize rotation test with specified side.
         
@@ -555,8 +689,9 @@ class LowerBackRotationTest(LowerBackFlexionTest):
         self.side = side.lower()
         if self.side not in ["left", "right"]:
             raise ValueError("Side must be 'left' or 'right'")
-        super().__init__(pose_detector, visualizer, config)
         
+        super().__init__(pose_detector, visualizer, config)
+    
     def _initialize_rom_data(self) -> ROMData:
         """Initialize ROM data specific to rotation test."""
         test_type = (LowerBackTestType.ROTATION_LEFT if self.side == "left" 
@@ -568,8 +703,33 @@ class LowerBackRotationTest(LowerBackFlexionTest):
             min_angle=float('inf'),
             max_angle=float('-inf')
         )
+    
+    def _set_default_angles(self):
+        """Set default angles to track for rotation."""
+        self.joint_angles = [
+            "rotation_angle",
+            "shoulder_alignment",
+            "hip_alignment"
+        ]
         
-    def calculate_angles(self, landmarks: Dict[int, Tuple[float, float, float]]) -> Dict[str, Angle]:
+        self.segment_angles = [
+            "shoulder_segment",
+            "hip_segment"
+        ]
+    
+    def _get_movement_guidance(self) -> str:
+        """Get guidance for rotation."""
+        return f"Slowly rotate your upper body to the {self.side}"
+    
+    def _get_movement_plane(self) -> MovementPlane:
+        """Get movement plane for rotation."""
+        return MovementPlane.TRANSVERSE
+    
+    def _is_primary_angle(self, angle_name: str) -> bool:
+        """Check if angle is primary for rotation."""
+        return angle_name == "rotation_angle"
+    
+    def calculate_angles(self, landmarks: Dict[int, Tuple[float, float, float]]) -> Tuple[Dict[str, float], Dict[str, float]]:
         """
         Calculate angles for rotation.
         
@@ -577,56 +737,71 @@ class LowerBackRotationTest(LowerBackFlexionTest):
             landmarks: Dictionary of landmark coordinates
             
         Returns:
-            Dictionary of calculated angles
+            Tuple of (joint_angles, segment_angles) dictionaries
         """
-        angles = {}
+        joint_angles = {}
+        segment_angles = {}
         
-        # Check if all required landmarks are available
-        if all(key in landmarks for key in [11, 12, 23, 24]):
-            # Calculate horizontal angle between shoulders and hips
-            shoulder_midpoint = (
-                (landmarks[11][0] + landmarks[12][0]) / 2,
-                (landmarks[11][1] + landmarks[12][1]) / 2,
-                (landmarks[11][2] + landmarks[12][2]) / 2
-            )
-            
-            hip_midpoint = (
-                (landmarks[23][0] + landmarks[24][0]) / 2,
-                (landmarks[23][1] + landmarks[24][1]) / 2,
-                (landmarks[23][2] + landmarks[24][2]) / 2
-            )
+        # Check if key landmarks are available
+        if all(idx in landmarks for idx in [11, 12, 23, 24]):
+            # Get shoulder and hip vectors
+            left_shoulder = np.array(landmarks[11])
+            right_shoulder = np.array(landmarks[12])
+            left_hip = np.array(landmarks[23])
+            right_hip = np.array(landmarks[24])
             
             # Project to horizontal plane for rotation measurement
-            shoulder_vector = [landmarks[12][0] - landmarks[11][0], 0, landmarks[12][2] - landmarks[11][2]]
-            hip_vector = [landmarks[24][0] - landmarks[23][0], 0, landmarks[24][2] - landmarks[23][2]]
+            shoulder_vector = np.array([right_shoulder[0] - left_shoulder[0], 0, right_shoulder[2] - left_shoulder[2]])
+            hip_vector = np.array([right_hip[0] - left_hip[0], 0, right_hip[2] - left_hip[2]])
             
             # Normalize vectors
             shoulder_norm = np.linalg.norm(shoulder_vector)
             hip_norm = np.linalg.norm(hip_vector)
             
             if shoulder_norm > 0 and hip_norm > 0:
-                shoulder_normalized = [x / shoulder_norm for x in shoulder_vector]
-                hip_normalized = [x / hip_norm for x in hip_vector]
+                shoulder_normalized = shoulder_vector / shoulder_norm
+                hip_normalized = hip_vector / hip_norm
                 
-                # Calculate dot product
-                dot_product = sum(a * b for a, b in zip(shoulder_normalized, hip_normalized))
-                dot_product = max(-1.0, min(1.0, dot_product))  # Clip to avoid numerical errors
-                
-                # Calculate angle
+                # Calculate dot product for angle
+                dot_product = np.clip(np.dot(shoulder_normalized, hip_normalized), -1.0, 1.0)
                 rotation_angle = np.degrees(np.arccos(dot_product))
                 
-                angles["rotation_angle"] = Angle(
-                    value=rotation_angle,
-                    joint_type=JointType.LOWER_BACK,
-                    plane=MovementPlane.TRANSVERSE,
-                    timestamp=time.time()
+                # Adjust sign based on side
+                if self.side == "right":
+                    shoulder_hip_cross = np.cross(hip_normalized, shoulder_normalized)
+                    if shoulder_hip_cross[1] < 0:  # Y-axis points up
+                        rotation_angle = -rotation_angle
+                else:  # left side
+                    shoulder_hip_cross = np.cross(shoulder_normalized, hip_normalized)
+                    if shoulder_hip_cross[1] < 0:
+                        rotation_angle = -rotation_angle
+                
+                joint_angles["rotation_angle"] = abs(rotation_angle)
+                
+                # Calculate additional angles
+                # Shoulder alignment (horizontal)
+                shoulder_segment = MathUtils.calculate_segment_angle(
+                    (left_shoulder[0], left_shoulder[1], 0),
+                    (right_shoulder[0], right_shoulder[1], 0)
                 )
+                
+                # Hip alignment (horizontal)
+                hip_segment = MathUtils.calculate_segment_angle(
+                    (left_hip[0], left_hip[1], 0),
+                    (right_hip[0], right_hip[1], 0)
+                )
+                
+                joint_angles["shoulder_alignment"] = shoulder_segment
+                joint_angles["hip_alignment"] = hip_segment
+                
+                segment_angles["shoulder_segment"] = shoulder_segment
+                segment_angles["hip_segment"] = hip_segment
         
-        return angles
+        return joint_angles, segment_angles
     
     def check_position(self, landmarks: Dict[int, Tuple[float, float, float]], frame_shape: Tuple[int, int, int]) -> Tuple[bool, str]:
         """
-        Check if the person is in the correct position for rotation test.
+        Check if the person is in the correct position for rotation.
         
         Args:
             landmarks: Dictionary of landmark coordinates
@@ -640,7 +815,7 @@ class LowerBackRotationTest(LowerBackFlexionTest):
         if not is_valid:
             return False, generic_message
         
-        # For rotation, person should be facing the camera
+        # Additional check: person should be facing the camera
         left_shoulder = landmarks[11]
         right_shoulder = landmarks[12]
         shoulder_width = abs(left_shoulder[0] - right_shoulder[0])
@@ -649,9 +824,3 @@ class LowerBackRotationTest(LowerBackFlexionTest):
             return False, "Turn to face the camera directly"
         
         return True, f"Good position for {self.side} rotation"
-    
-    def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """Process frame with modified guidance for rotation."""
-        if self.data.status == AssessmentStatus.IN_PROGRESS:
-            self.data.guidance_message = f"Slowly rotate your upper body to the {self.side}"
-        return super().process_frame(frame)

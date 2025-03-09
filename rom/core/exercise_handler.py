@@ -3,54 +3,72 @@ from typing import Dict, Tuple, Any, Optional, Type
 import numpy as np
 import logging
 
-from rom.core.base import ROMTest, ROMData
+from rom.core.base import EnhancedROMTest, ROMData
 from rom.utils.pose_detector import PoseDetector
 from rom.utils.visualization import PoseVisualizer
 from rom.tests.lower_back_test import (
-    LowerBackFlexionTest, 
-    LowerBackExtensionTest,
-    LowerBackLateralFlexionTest,
-    LowerBackRotationTest
+    EnhancedLowerBackFlexionTest, 
+    EnhancedLowerBackExtensionTest,
+    EnhancedLowerBackLateralFlexionTest,
+    EnhancedLowerBackRotationTest
 )
 
 # Setup logging
 logger = logging.getLogger("rom.exercise_handler")
 
 
-class ExerciseManager:
+class EnhancedExerciseManager:
     """
-    Manager for ROM exercises and assessments.
+    Enhanced manager for ROM exercises and assessments with Sports2D features.
     
     This class serves as the main entry point for ROM assessments,
     managing the lifecycle of different test types and providing a 
     unified interface for processing frames.
     """
     
-    def __init__(self):
-        """Initialize the exercise manager."""
-        self.pose_detector = PoseDetector()
+    def __init__(self, config: Dict[str, Any] = None):
+        """
+        Initialize the exercise manager.
+        
+        Args:
+            config: Global configuration that applies to all tests
+        """
+        self.config = config or {}
+        
+        # Initialize core components
+        self.pose_detector = PoseDetector(
+            model_type=self.config.get("model_type", "HALPE_26"),
+            det_frequency=self.config.get("det_frequency", 4),
+            tracking_mode=self.config.get("tracking_mode", "sports2d"),
+            keypoint_likelihood_threshold=self.config.get("keypoint_likelihood_threshold", 0.3),
+            average_likelihood_threshold=self.config.get("average_likelihood_threshold", 0.5),
+            keypoint_number_threshold=self.config.get("keypoint_number_threshold", 0.3)
+        )
+        
         self.visualizer = PoseVisualizer()
         
         # Register test types
         self.test_registry = {
             # Lower back tests
-            "lower_back_flexion": LowerBackFlexionTest,
-            "lower_back_extension": LowerBackExtensionTest,
+            "lower_back_flexion": EnhancedLowerBackFlexionTest,
+            "lower_back_extension": EnhancedLowerBackExtensionTest,
             "lower_back_lateral_flexion_left": lambda pd, vis, cfg: 
-                LowerBackLateralFlexionTest(pd, vis, cfg, side="left"),
+                EnhancedLowerBackLateralFlexionTest(pd, vis, cfg, side="left"),
             "lower_back_lateral_flexion_right": lambda pd, vis, cfg: 
-                LowerBackLateralFlexionTest(pd, vis, cfg, side="right"),
+                EnhancedLowerBackLateralFlexionTest(pd, vis, cfg, side="right"),
             "lower_back_rotation_left": lambda pd, vis, cfg:
-                LowerBackRotationTest(pd, vis, cfg, side="left"),
+                EnhancedLowerBackRotationTest(pd, vis, cfg, side="left"),
             "lower_back_rotation_right": lambda pd, vis, cfg:
-                LowerBackRotationTest(pd, vis, cfg, side="right"),
+                EnhancedLowerBackRotationTest(pd, vis, cfg, side="right"),
         }
         
         # Store active test instances
         self.active_tests = {}
+        
+        logger.info(f"Initialized EnhancedExerciseManager with {len(self.test_registry)} test types")
     
     def create_test(self, test_type: str, config: Optional[Dict[str, Any]] = None, 
-                   session_id: Optional[str] = None) -> ROMTest:
+                   session_id: Optional[str] = None) -> EnhancedROMTest:
         """
         Create a test instance of the specified type.
         
@@ -71,9 +89,12 @@ class ExerciseManager:
         # Generate session ID if not provided
         session_id = session_id or f"session_{id(test_type)}_{id(config)}"
         
+        # Merge global and test-specific config
+        merged_config = {**self.config, **(config or {})}
+        
         # Create test instance
         test_factory = self.test_registry[test_type]
-        test_instance = test_factory(self.pose_detector, self.visualizer, config or {})
+        test_instance = test_factory(self.pose_detector, self.visualizer, merged_config)
         
         # Store for later reference
         self.active_tests[session_id] = test_instance
@@ -81,7 +102,34 @@ class ExerciseManager:
         logger.info(f"Created test: {test_type} (Session: {session_id})")
         return test_instance
     
-    def get_test(self, session_id: str) -> Optional[ROMTest]:
+    def create_custom_test(self, body_parts: List[str], angles: List[Dict[str, Any]], 
+                          config: Optional[Dict[str, Any]] = None,
+                          session_id: Optional[str] = None) -> EnhancedROMTest:
+        """
+        Create a custom test with specified body parts and angles.
+        
+        Args:
+            body_parts: List of body part names to track
+            angles: List of angle definitions
+            config: Configuration for the test
+            session_id: Optional session ID for tracking
+            
+        Returns:
+            Initialized custom test instance
+        """
+        # This is a placeholder for the custom test functionality
+        # In a full implementation, you would create a custom test class
+        # that uses the provided body parts and angles
+        
+        # For now, we'll use the default lower back flexion test
+        logger.warning("Custom test creation not fully implemented yet. Using lower_back_flexion test.")
+        
+        test_config = config or {}
+        test_config["relevant_body_parts"] = body_parts
+        
+        return self.create_test("lower_back_flexion", test_config, session_id)
+    
+    def get_test(self, session_id: str) -> Optional[EnhancedROMTest]:
         """
         Get an existing test instance by session ID.
         
@@ -189,46 +237,3 @@ class ExerciseManager:
                 "movement_type": "rotation_right"
             }
         }
-
-
-class ExerciseHandler:
-    """
-    Legacy compatibility class for existing code.
-    
-    This class provides a simplified interface compatible with the
-    original codebase while using the new ExerciseManager internally.
-    """
-    
-    def __init__(self, exercise_name: str):
-        """
-        Initialize the exercise handler.
-        
-        Args:
-            exercise_name: Name of the exercise
-        """
-        self.exercise_name = exercise_name
-        self.manager = ExerciseManager()
-        
-        # Map old exercise names to new test types
-        self.exercise_map = {
-            "hawkins": "shoulder_hawkins_test",
-            "lowerback": "lower_back_flexion",
-            "lower_back": "lower_back_flexion",
-            "lower_back_flexion": "lower_back_flexion",
-            "lower_back_extension": "lower_back_extension"
-        }
-        
-        # Get the appropriate test type
-        self.test_type = self.exercise_map.get(exercise_name.lower(), "lower_back_flexion")
-    
-    def process_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
-        """
-        Process a single frame.
-        
-        Args:
-            frame: Input video frame
-            
-        Returns:
-            Tuple of (processed_frame, rom_data)
-        """
-        return self.manager.process_frame(frame, self.test_type)
