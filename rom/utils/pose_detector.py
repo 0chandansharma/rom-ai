@@ -3,42 +3,69 @@ import mediapipe as mp
 import cv2
 import numpy as np
 from typing import Dict, Tuple, List, Optional, Any
+import logging
 
+logger = logging.getLogger("rom.pose_detector")
 
 class PoseDetector:
-    """Enhanced pose detector using MediaPipe with additional features."""
+    """Enhanced pose detector with Sports2D capabilities."""
     
     def __init__(self, 
-                 static_image_mode=False, 
-                 model_complexity=1, 
-                 smooth_landmarks=True, 
-                 min_detection_confidence=0.5,
-                 min_tracking_confidence=0.5):
+                 model_type='HALPE_26',
+                 det_frequency=4,
+                 tracking_mode='sports2d',
+                 keypoint_likelihood_threshold=0.3,
+                 average_likelihood_threshold=0.5,
+                 keypoint_number_threshold=0.3,
+                 static_image_mode=False,
+                 model_complexity=1):
         """
-        Initialize the pose detector with MediaPipe.
+        Initialize the pose detector with enhanced features.
         
         Args:
-            static_image_mode: Whether to treat input as static images (slower but more accurate)
+            model_type: Type of pose model ('HALPE_26', 'COCO_133', 'COCO_17')
+            det_frequency: Run detection every N frames (tracking in between)
+            tracking_mode: 'sports2d' or 'deepsort'
+            keypoint_likelihood_threshold: Minimum confidence for keypoints
+            average_likelihood_threshold: Minimum average confidence for person
+            keypoint_number_threshold: Minimum fraction of keypoints detected
+            static_image_mode: Whether to treat input as static images
             model_complexity: Model complexity (0, 1, or 2)
-            smooth_landmarks: Whether to filter landmarks to reduce jitter
-            min_detection_confidence: Minimum confidence for detection
-            min_tracking_confidence: Minimum confidence for tracking
         """
+        self.model_type = model_type.upper()
+        self.det_frequency = det_frequency
+        self.tracking_mode = tracking_mode
+        self.keypoint_likelihood_threshold = keypoint_likelihood_threshold
+        self.average_likelihood_threshold = average_likelihood_threshold
+        self.keypoint_number_threshold = keypoint_number_threshold
+        
+        # Initialize MediaPipe components
         self.mp_pose = mp.solutions.pose
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         
-        # Initialize MediaPipe Pose
+        # Initialize pose detector
         self.pose = self.mp_pose.Pose(
             static_image_mode=static_image_mode,
             model_complexity=model_complexity,
-            smooth_landmarks=smooth_landmarks,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence
+            smooth_landmarks=True,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
         )
         
-        # Landmark indices for common body parts for reference
-        self.LANDMARK_INDICES = {
+        # Store previous keypoints for tracking
+        self.prev_keypoints = None
+        self.frame_count = 0
+        
+        # Initialize keypoint mapping based on model type
+        self._init_keypoint_mapping()
+        
+        logger.info(f"Initialized PoseDetector with model={model_type}, tracking={tracking_mode}")
+    
+    def _init_keypoint_mapping(self):
+        """Initialize keypoint mapping based on selected model."""
+        # Common keypoint mapping for all models
+        self.keypoint_mapping = {
             "nose": 0,
             "left_eye_inner": 1,
             "left_eye": 2,
@@ -73,71 +100,261 @@ class PoseDetector:
             "left_foot_index": 31,
             "right_foot_index": 32
         }
-
-    def find_pose(self, frame: np.ndarray) -> Optional[Any]:
+        
+        # Add model-specific mappings if needed
+        if self.model_type == 'HALPE_26':
+            self.keypoint_mapping.update({
+                "left_big_toe": 20,
+                "right_big_toe": 21,
+                "left_small_toe": 22,
+                "right_small_toe": 23,
+                "left_heel": 24,
+                "right_heel": 25,
+            })
+    
+    def find_pose(self, frame: np.ndarray) -> List[Dict[int, Tuple[float, float, float]]]:
         """
-        Process frame and find pose landmarks.
+        Process frame and find pose landmarks for all detected persons.
         
         Args:
             frame: Input video frame
             
         Returns:
-            Pose landmarks or None if no pose detected
+            List of dictionaries mapping landmark indices to (x, y, z) coordinates
         """
-        # Convert to RGB for MediaPipe
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Process the frame with MediaPipe
-        results = self.pose.process(rgb_frame)
-        
-        return results.pose_landmarks
-
-    def get_landmark_coordinates(self, frame: np.ndarray, landmarks: Any) -> Dict[int, Tuple[float, float, float]]:
-        """
-        Convert normalized landmarks to pixel coordinates.
-        
-        Args:
-            frame: Input video frame
-            landmarks: Pose landmarks from MediaPipe
-            
-        Returns:
-            Dictionary of landmark indices to (x, y, z) coordinates
-        """
+        self.frame_count += 1
         h, w, _ = frame.shape
-        coordinates = {}
         
-        if landmarks:
-            for idx, landmark in enumerate(landmarks.landmark):
-                x = int(landmark.x * w)
-                y = int(landmark.y * h)
+        # Only run detection every det_frequency frames
+        run_detection = (self.frame_count % self.det_frequency == 1) or (self.prev_keypoints is None)
+        
+        if run_detection:
+            # Convert to RGB for MediaPipe
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # Process the frame with MediaPipe
+            results = self.pose.process(rgb_frame)
+            
+            if not results.pose_landmarks:
+                return []
+            
+            # Convert landmarks to our format
+            keypoints = []
+            scores = []
+            
+            # For now, MediaPipe only detects one person
+            # In a real multi-person system, we'd iterate through multiple detections
+            person_keypoints = {}
+            person_scores = np.ones(33)  # MediaPipe has 33 landmarks
+            
+            for idx, landmark in enumerate(results.pose_landmarks.landmark):
+                x = landmark.x * w
+                y = landmark.y * h
                 z = landmark.z
                 visibility = landmark.visibility if hasattr(landmark, 'visibility') else 1.0
                 
-                # Only include landmarks with reasonable visibility
-                if visibility > 0.5:
-                    coordinates[idx] = (x, y, z)
-                
-        return coordinates
+                # Add to person's keypoints
+                person_keypoints[idx] = (x, y, z)
+                person_scores[idx] = visibility
+            
+            keypoints.append(person_keypoints)
+            scores.append(person_scores)
+            
+            # Filter keypoints and persons based on confidence thresholds
+            filtered_keypoints, filtered_scores = self._filter_detections(keypoints, scores)
+            
+            # Apply tracking
+            tracked_keypoints, tracked_scores = self._apply_tracking(filtered_keypoints, filtered_scores, frame)
+            
+            self.prev_keypoints = tracked_keypoints
+            return tracked_keypoints
+        
+        else:
+            # Use tracking for intermediate frames
+            return self.prev_keypoints
     
-    def draw_pose_landmarks(self, frame: np.ndarray, landmarks: Any) -> np.ndarray:
+    def _filter_detections(self, keypoints: List[Dict[int, Tuple[float, float, float]]], 
+                          scores: List[np.ndarray]) -> Tuple[List[Dict[int, Tuple[float, float, float]]], List[np.ndarray]]:
         """
-        Draw all pose landmarks on the frame.
+        Filter detections based on confidence thresholds.
+        
+        Args:
+            keypoints: List of keypoint dictionaries
+            scores: List of score arrays
+            
+        Returns:
+            Filtered keypoints and scores
+        """
+        filtered_keypoints = []
+        filtered_scores = []
+        
+        for person_idx, (person_kpts, person_scores) in enumerate(zip(keypoints, scores)):
+            # Filter keypoints by likelihood threshold
+            valid_keypoints = {}
+            valid_scores = []
+            
+            for kpt_idx, (coords, score) in enumerate(zip(person_kpts.items(), person_scores)):
+                idx, (x, y, z) = coords
+                if score >= self.keypoint_likelihood_threshold:
+                    valid_keypoints[idx] = (x, y, z)
+                    valid_scores.append(score)
+            
+            # Check if person has enough valid keypoints
+            if len(valid_keypoints) >= len(person_kpts) * self.keypoint_number_threshold:
+                # Check if average confidence is high enough
+                if np.mean(valid_scores) >= self.average_likelihood_threshold:
+                    filtered_keypoints.append(valid_keypoints)
+                    filtered_scores.append(person_scores)
+        
+        return filtered_keypoints, filtered_scores
+    
+    def _apply_tracking(self, keypoints: List[Dict[int, Tuple[float, float, float]]], 
+                       scores: List[np.ndarray],
+                       frame: np.ndarray) -> Tuple[List[Dict[int, Tuple[float, float, float]]], List[np.ndarray]]:
+        """
+        Apply tracking to maintain consistent person IDs.
+        
+        Args:
+            keypoints: List of keypoint dictionaries
+            scores: List of score arrays
+            frame: Current video frame
+            
+        Returns:
+            Tracked keypoints and scores
+        """
+        if self.prev_keypoints is None or not keypoints:
+            return keypoints, scores
+        
+        if self.tracking_mode == 'sports2d':
+            return self._track_sports2d(keypoints, scores)
+        else:
+            # Default simple tracking
+            return keypoints, scores
+    
+    def _track_sports2d(self, keypoints: List[Dict[int, Tuple[float, float, float]]], 
+                       scores: List[np.ndarray]) -> Tuple[List[Dict[int, Tuple[float, float, float]]], List[np.ndarray]]:
+        """
+        Track people using Sports2D approach (distance-based association).
+        
+        Args:
+            keypoints: List of keypoint dictionaries
+            scores: List of score arrays
+            
+        Returns:
+            Tracked keypoints and scores
+        """
+        # Simple implementation for now
+        if not self.prev_keypoints or not keypoints:
+            return keypoints, scores
+        
+        # For each previous person, find the closest current person
+        tracked_keypoints = []
+        tracked_scores = []
+        used_indices = set()
+        
+        for prev_kpts in self.prev_keypoints:
+            best_distance = float('inf')
+            best_idx = -1
+            
+            for i, curr_kpts in enumerate(keypoints):
+                if i in used_indices:
+                    continue
+                
+                # Calculate distance between common keypoints
+                total_dist = 0
+                count = 0
+                
+                for kpt_idx in prev_kpts:
+                    if kpt_idx in curr_kpts:
+                        prev_pos = prev_kpts[kpt_idx]
+                        curr_pos = curr_kpts[kpt_idx]
+                        dist = np.sqrt((prev_pos[0] - curr_pos[0])**2 + 
+                                      (prev_pos[1] - curr_pos[1])**2)
+                        total_dist += dist
+                        count += 1
+                
+                if count > 0:
+                    avg_dist = total_dist / count
+                    if avg_dist < best_distance:
+                        best_distance = avg_dist
+                        best_idx = i
+            
+            if best_idx != -1 and best_distance < 100:  # Threshold for association
+                tracked_keypoints.append(keypoints[best_idx])
+                tracked_scores.append(scores[best_idx])
+                used_indices.add(best_idx)
+            else:
+                # If no match found, keep previous keypoints
+                tracked_keypoints.append(prev_kpts)
+                tracked_scores.append(np.ones(len(scores[0])) * 0.5)  # Default score
+        
+        # Add any new detections that weren't matched
+        for i, (kpts, s) in enumerate(zip(keypoints, scores)):
+            if i not in used_indices:
+                tracked_keypoints.append(kpts)
+                tracked_scores.append(s)
+        
+        return tracked_keypoints, tracked_scores
+    
+    def draw_pose_landmarks(self, frame: np.ndarray, landmarks: Dict[int, Tuple[float, float, float]], 
+                           color: Tuple[int, int, int] = (0, 255, 0),
+                           thickness: int = 2,
+                           radius: int = 5,
+                           draw_connections: bool = True) -> np.ndarray:
+        """
+        Draw pose landmarks and connections on the frame.
         
         Args:
             frame: Input video frame
-            landmarks: Pose landmarks from MediaPipe
+            landmarks: Dictionary of landmark indices to coordinates
+            color: Color to use for drawing
+            thickness: Line thickness for connections
+            radius: Radius for landmark points
+            draw_connections: Whether to draw connections between landmarks
             
         Returns:
             Frame with landmarks drawn
         """
-        if landmarks:
-            self.mp_drawing.draw_landmarks(
-                frame,
-                landmarks,
-                self.mp_pose.POSE_CONNECTIONS,
-                landmark_drawing_spec=self.mp_drawing_styles.get_default_pose_landmarks_style()
-            )
+        for idx, (x, y, _) in landmarks.items():
+            cv2.circle(frame, (int(x), int(y)), radius, color, -1)
+        
+        if draw_connections:
+            # Define connections based on model type
+            connections = self._get_connections()
+            
+            for connection in connections:
+                if connection[0] in landmarks and connection[1] in landmarks:
+                    pt1 = (int(landmarks[connection[0]][0]), int(landmarks[connection[0]][1]))
+                    pt2 = (int(landmarks[connection[1]][0]), int(landmarks[connection[1]][1]))
+                    cv2.line(frame, pt1, pt2, color, thickness)
+        
         return frame
+    
+    def _get_connections(self) -> List[Tuple[int, int]]:
+        """Get landmark connections based on model type."""
+        # Basic connections for all models
+        connections = [
+            # Torso
+            (11, 12), (11, 23), (12, 24), (23, 24),
+            # Right arm
+            (11, 13), (13, 15),
+            # Left arm
+            (12, 14), (14, 16),
+            # Right leg
+            (23, 25), (25, 27),
+            # Left leg
+            (24, 26), (26, 28),
+        ]
+        
+        # Add model-specific connections
+        if self.model_type == 'HALPE_26' or self.model_type == 'COCO_133':
+            connections.extend([
+                # Feet
+                (27, 31), (28, 32), (27, 29), (28, 30),
+                (29, 31), (30, 32)
+            ])
+        
+        return connections
     
     def get_joint_angles(self, landmarks: Dict[int, Tuple[float, float, float]]) -> Dict[str, float]:
         """
@@ -151,54 +368,49 @@ class PoseDetector:
         """
         angles = {}
         
-        # Calculate some common joint angles
-        
-        # Elbow angles
+        # Calculate elbow angles
         if all(idx in landmarks for idx in [11, 13, 15]):  # Left elbow
-            shoulder, elbow, wrist = landmarks[11], landmarks[13], landmarks[15]
-            angles["left_elbow"] = self._calculate_angle(shoulder, elbow, wrist)
+            angles["left_elbow"] = self._calculate_angle(
+                landmarks[11], landmarks[13], landmarks[15]
+            )
             
         if all(idx in landmarks for idx in [12, 14, 16]):  # Right elbow
-            shoulder, elbow, wrist = landmarks[12], landmarks[14], landmarks[16]
-            angles["right_elbow"] = self._calculate_angle(shoulder, elbow, wrist)
+            angles["right_elbow"] = self._calculate_angle(
+                landmarks[12], landmarks[14], landmarks[16]
+            )
         
-        # Knee angles
+        # Calculate knee angles
         if all(idx in landmarks for idx in [23, 25, 27]):  # Left knee
-            hip, knee, ankle = landmarks[23], landmarks[25], landmarks[27]
-            angles["left_knee"] = self._calculate_angle(hip, knee, ankle)
+            angles["left_knee"] = self._calculate_angle(
+                landmarks[23], landmarks[25], landmarks[27]
+            )
             
         if all(idx in landmarks for idx in [24, 26, 28]):  # Right knee
-            hip, knee, ankle = landmarks[24], landmarks[26], landmarks[28]
-            angles["right_knee"] = self._calculate_angle(hip, knee, ankle)
+            angles["right_knee"] = self._calculate_angle(
+                landmarks[24], landmarks[26], landmarks[28]
+            )
         
-        # Hip angles
+        # Calculate hip angles
         if all(idx in landmarks for idx in [11, 23, 25]):  # Left hip
-            shoulder, hip, knee = landmarks[11], landmarks[23], landmarks[25]
-            angles["left_hip"] = self._calculate_angle(shoulder, hip, knee)
+            angles["left_hip"] = self._calculate_angle(
+                landmarks[11], landmarks[23], landmarks[25]
+            )
             
         if all(idx in landmarks for idx in [12, 24, 26]):  # Right hip
-            shoulder, hip, knee = landmarks[12], landmarks[24], landmarks[26]
-            angles["right_hip"] = self._calculate_angle(shoulder, hip, knee)
+            angles["right_hip"] = self._calculate_angle(
+                landmarks[12], landmarks[24], landmarks[26]
+            )
         
-        # Calculate back angle (angle between shoulders, mid-hip, and mid-knee)
+        # Calculate trunk angle
         if all(idx in landmarks for idx in [11, 12, 23, 24, 25, 26]):
-            shoulder_midpoint = (
-                (landmarks[11][0] + landmarks[12][0]) / 2,
-                (landmarks[11][1] + landmarks[12][1]) / 2,
-                (landmarks[11][2] + landmarks[12][2]) / 2
-            )
-            hip_midpoint = (
-                (landmarks[23][0] + landmarks[24][0]) / 2,
-                (landmarks[23][1] + landmarks[24][1]) / 2,
-                (landmarks[23][2] + landmarks[24][2]) / 2
-            )
-            knee_midpoint = (
-                (landmarks[25][0] + landmarks[26][0]) / 2,
-                (landmarks[25][1] + landmarks[26][1]) / 2,
-                (landmarks[25][2] + landmarks[26][2]) / 2
-            )
-            angles["trunk"] = self._calculate_angle(shoulder_midpoint, hip_midpoint, knee_midpoint)
+            shoulder_midpoint = self._get_midpoint(landmarks[11], landmarks[12])
+            hip_midpoint = self._get_midpoint(landmarks[23], landmarks[24])
+            knee_midpoint = self._get_midpoint(landmarks[25], landmarks[26])
             
+            angles["trunk"] = self._calculate_angle(
+                shoulder_midpoint, hip_midpoint, knee_midpoint
+            )
+        
         return angles
     
     def _calculate_angle(self, p1: Tuple[float, float, float], 
@@ -233,88 +445,11 @@ class PoseDetector:
         # Return angle in degrees
         return np.degrees(np.arccos(dot_product))
     
-    def estimate_pose_stability(self, landmark_history: List[Dict[int, Tuple[float, float, float]]], 
-                               key_points: List[int] = None) -> float:
-        """
-        Estimate the stability of the pose over time.
-        
-        Args:
-            landmark_history: List of landmark dictionaries from previous frames
-            key_points: List of landmark indices to consider (if None, use all common points)
-            
-        Returns:
-            Stability score between 0 (unstable) and 1 (stable)
-        """
-        if not landmark_history or len(landmark_history) < 2:
-            return 0.0
-        
-        if key_points is None:
-            # Use common landmarks that are usually visible
-            key_points = [
-                11, 12,  # Shoulders
-                23, 24,  # Hips
-                13, 14,  # Elbows
-                25, 26   # Knees
-            ]
-        
-        # Calculate the average movement of key points between frames
-        movements = []
-        for i in range(1, len(landmark_history)):
-            prev_landmarks = landmark_history[i-1]
-            curr_landmarks = landmark_history[i]
-            
-            frame_movements = []
-            for point_idx in key_points:
-                if point_idx in prev_landmarks and point_idx in curr_landmarks:
-                    prev_point = prev_landmarks[point_idx]
-                    curr_point = curr_landmarks[point_idx]
-                    
-                    # Calculate Euclidean distance
-                    distance = np.sqrt(
-                        (prev_point[0] - curr_point[0])**2 + 
-                        (prev_point[1] - curr_point[1])**2
-                    )
-                    frame_movements.append(distance)
-            
-            if frame_movements:
-                movements.append(np.mean(frame_movements))
-        
-        if not movements:
-            return 0.0
-        
-        # Calculate stability score (inversely proportional to movement)
-        avg_movement = np.mean(movements)
-        stability = np.exp(-avg_movement / 10.0)  # Exponential decay based on movement
-        
-        return min(max(stability, 0.0), 1.0)  # Clamp between 0 and 1
-    
-    def get_body_orientation(self, landmarks: Dict[int, Tuple[float, float, float]]) -> str:
-        """
-        Determine if the person is facing the camera, facing left, or facing right.
-        
-        Args:
-            landmarks: Dictionary of landmark coordinates
-            
-        Returns:
-            Orientation as string: "front", "left", "right", or "unknown"
-        """
-        if 11 not in landmarks or 12 not in landmarks:  # Need shoulders
-            return "unknown"
-        
-        left_shoulder = landmarks[11]
-        right_shoulder = landmarks[12]
-        
-        # Check which shoulder is more visible (z coordinate closer to camera)
-        shoulder_z_diff = left_shoulder[2] - right_shoulder[2]
-        
-        # Also check shoulder x distance to detect if person is turned
-        shoulder_width = abs(left_shoulder[0] - right_shoulder[0])
-        
-        if abs(shoulder_z_diff) < 0.1 and shoulder_width > 100:
-            return "front"  # Facing camera
-        elif shoulder_z_diff > 0.1:
-            return "right"  # Facing right
-        elif shoulder_z_diff < -0.1:
-            return "left"   # Facing left
-        else:
-            return "unknown"
+    def _get_midpoint(self, p1: Tuple[float, float, float], 
+                     p2: Tuple[float, float, float]) -> Tuple[float, float, float]:
+        """Calculate the midpoint between two points."""
+        return (
+            (p1[0] + p2[0]) / 2,
+            (p1[1] + p2[1]) / 2,
+            (p1[2] + p2[2]) / 2
+        )

@@ -1,0 +1,228 @@
+# ROM Enhancement Plan: Integrating Sports2D Features
+
+I'll outline a comprehensive plan to enhance your ROM assessment system by integrating key features from Sports2D while maintaining the existing architecture of your ROM application.
+
+## Architecture Overview
+
+### Core Components to Adopt from Sports2D
+
+1. **Pose Detection & Tracking**
+   - Implement the robust person detection and tracking system from Sports2D
+   - Adopt the multi-person tracking capabilities with consistent IDs across frames
+   - Integrate support for different pose models (HALPE_26, COCO, etc.)
+
+2. **Angle Calculation Engine**
+   - Adopt Sports2D's comprehensive angle calculation methodology
+   - Support joint angles and segment angles as defined in Sports2D
+   - Implement flexible angle definitions based on custom keypoint combinations
+
+3. **Visualization System**
+   - Selectively display only relevant body parts for specific assessments
+   - Add customizable visualization options for connections, landmarks, and angles
+   - Implement angle display with motion trajectory visualization
+
+4. **Data Processing Pipeline**
+   - Add filtering options from Sports2D (Butterworth, Gaussian, LOESS, Median)
+   - Implement data interpolation for missing keypoints
+   - Support for metric conversion (pixels to meters)
+
+5. **Analysis & Reporting**
+   - Enhance reporting with detailed joint angle analysis
+   - Add assessment comparison against normative data
+   - Generate comprehensive reports similar to Sports2D
+
+## Implementation Plan
+
+### 1. Core Module Enhancements
+
+```python
+# Updated PoseDetector class
+class PoseDetector:
+    def __init__(self, model_type='HALPE_26', det_frequency=4, tracking_mode='sports2d'):
+        # Initialize with flexible model support
+        self.model_type = model_type
+        self.det_frequency = det_frequency
+        self.tracking_mode = tracking_mode
+        # Setup appropriate model based on selection
+        
+    def find_pose(self, frame):
+        # Enhanced pose detection with support for different models
+    
+    def track_persons(self, keypoints, scores):
+        # Implement tracking based on tracking_mode
+        if self.tracking_mode == 'sports2d':
+            return self._track_sports2d(keypoints, scores)
+        elif self.tracking_mode == 'deepsort':
+            return self._track_deepsort(keypoints, scores)
+```
+
+### 2. Angle Calculation System
+
+```python
+# Enhanced MathUtils class
+class EnhancedMathUtils:
+    @staticmethod
+    def calculate_joint_angle(landmarks, keypoint_names, joint_type):
+        # Dynamic angle calculation based on joint type
+        
+    @staticmethod
+    def calculate_segment_angle(landmarks, keypoint_names, segment_type):
+        # Dynamic segment angle calculation
+        
+    @staticmethod
+    def calculate_custom_angle(p1, p2, p3, angle_type='absolute'):
+        # Flexible angle calculation for custom points
+```
+
+### 3. Flexible Assessment Configuration
+
+```python
+class AssessmentConfig:
+    def __init__(self):
+        self.joint_angles = []
+        self.segment_angles = []
+        self.relevant_body_parts = []
+        self.target_rom = {}
+        
+    def add_joint_angle(self, name, landmarks):
+        # Add joint angle to track
+        
+    def add_segment_angle(self, name, landmarks):
+        # Add segment angle to track
+        
+    def set_relevant_body_parts(self, parts):
+        # Specify which body parts to visualize
+```
+
+### 4. Enhanced Visualization
+
+```python
+class EnhancedVisualizer:
+    def __init__(self, theme='dark'):
+        # Initialize with theme support
+        
+    def draw_selective_connections(self, frame, landmarks, relevant_parts_only=True):
+        # Draw only connections relevant to the assessment
+        
+    def draw_angles(self, frame, angles, display_mode='both'):
+        # Draw angles with flexible display options
+        
+    def create_assessment_report(self, assessment_data, include_plots=True):
+        # Generate comprehensive visual report
+```
+
+### 5. Data Processing Pipeline
+
+```python
+class DataProcessor:
+    def __init__(self, filter_type='butterworth', interpolate=True):
+        # Initialize with filtering preferences
+        
+    def process_angles(self, angle_history):
+        # Process angles with selected filter
+        
+    def interpolate_missing_data(self, data, max_gap_size=10):
+        # Interpolate missing data points
+        
+    def convert_to_metrics(self, pixel_data, calibration_factor):
+        # Convert pixel measurements to physical units
+```
+
+## Key Files to Modify
+
+1. **rom/utils/pose_detector.py**
+   - Enhance with Sports2D detection and tracking capabilities
+   - Add support for multiple pose models
+
+2. **rom/core/base.py**
+   - Extend angle calculation with flexible keypoint definitions
+   - Add support for segment angles
+
+3. **rom/utils/visualization.py**
+   - Implement selective body part visualization
+   - Enhance angle display options
+
+4. **rom/core/exercise_handler.py**
+   - Add customizable assessment configuration
+   - Implement flexible angle tracking
+
+5. **rom/tests/**
+   - Enhance existing test classes with more detailed analysis
+   - Add new test types based on Sports2D capabilities
+
+6. **rom/api/main.py**
+   - Add endpoints for flexible assessment configuration
+   - Enhance WebSocket processing with Sports2D features
+
+## Implementation Steps
+
+### Phase 1: Core Integration
+
+1. Integrate Sports2D pose detection and tracking methods
+2. Implement flexible angle calculation system
+3. Add data filtering and interpolation capabilities
+
+### Phase 2: Enhanced Visualization
+
+1. Implement selective body part visualization
+2. Enhance angle display and trajectory visualization
+3. Add comprehensive reporting capabilities
+
+### Phase 3: User Configuration
+
+1. Implement API for custom assessment configuration
+2. Add dynamic body part specification
+3. Support custom angle definitions
+
+### Phase 4: Testing and Refinement
+
+1. Validate angle calculations against Sports2D
+2. Performance optimization for real-time processing
+3. Fine-tune visualization and reporting
+
+## Example Usage
+
+After implementation, your system could be used like this:
+
+```python
+# Create an assessment with custom body parts
+assessment = ROMAssessment(
+    test_type="custom",
+    body_parts=["left_shoulder", "left_elbow", "left_wrist"],
+    angles=[
+        {"name": "elbow_flexion", "points": ["left_shoulder", "left_elbow", "left_wrist"]},
+    ]
+)
+
+# Process frames with enhanced visualization
+for frame in video_frames:
+    processed_frame, rom_data = assessment.process_frame(frame)
+    
+    # Access detailed angle data
+    current_angle = rom_data["angles"]["elbow_flexion"]
+    rom = rom_data["rom"]["elbow_flexion"]
+    
+    # Generate report
+    if rom_data["status"] == "completed":
+        report = assessment.generate_report()
+```
+
+## Additional Enhancements
+
+1. **Time-Series Analysis**
+   - Implement velocity and acceleration calculations for movements
+   - Add phase detection (preparation, execution, recovery)
+
+2. **Comparative Analysis**
+   - Add before/after comparison for treatment effectiveness
+   - Implement comparison against reference movements
+
+3. **Exercise Quality Assessment**
+   - Add movement smoothness metrics
+   - Implement form correctness scoring
+
+4. **Customizable Guidance**
+   - Dynamic instruction generation based on observed movement
+   - Real-time correction suggestions
+
+By following this implementation plan, you'll be able to integrate the powerful features of Sports2D while maintaining the flexibility and healthcare focus of your ROM assessment system.
