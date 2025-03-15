@@ -1,8 +1,7 @@
 # rom/api/main.py
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Body
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Dict, List, Any, Optional, Union
 import uvicorn
@@ -17,14 +16,15 @@ import httpx
 from datetime import datetime
 
 # Import ROM modules
+from rom.api.config_endpoints import ConfigManager
 from rom.core.base import AssessmentStatus, JointType
 from rom.utils.pose_detector import PoseDetector
-from rom.utils.visualization import PoseVisualizer
+from rom.utils.visualization import EnhancedVisualizer
 from rom.tests.lower_back_test import (
-    LowerBackFlexionTest, 
-    LowerBackExtensionTest,
-    LowerBackLateralFlexionTest,
-    LowerBackRotationTest
+    EnhancedLowerBackFlexionTest, 
+    EnhancedLowerBackExtensionTest,
+    EnhancedLowerBackLateralFlexionTest,
+    EnhancedLowerBackRotationTest
 )
 
 # Setup logging
@@ -74,17 +74,17 @@ app.add_middleware(
 # Initialize test factories
 test_factories = {
     "lower_back_flexion": lambda pose_detector, visualizer, config: 
-        LowerBackFlexionTest(pose_detector, visualizer, config),
+        EnhancedLowerBackFlexionTest(pose_detector, visualizer, config),
     "lower_back_extension": lambda pose_detector, visualizer, config: 
-        LowerBackExtensionTest(pose_detector, visualizer, config),
+        EnhancedLowerBackExtensionTest(pose_detector, visualizer, config),
     "lower_back_lateral_flexion_left": lambda pose_detector, visualizer, config: 
-        LowerBackLateralFlexionTest(pose_detector, visualizer, config, side="left"),
+        EnhancedLowerBackLateralFlexionTest(pose_detector, visualizer, config, side="left"),
     "lower_back_lateral_flexion_right": lambda pose_detector, visualizer, config: 
-        LowerBackLateralFlexionTest(pose_detector, visualizer, config, side="right"),
+        EnhancedLowerBackLateralFlexionTest(pose_detector, visualizer, config, side="right"),
     "lower_back_rotation_left": lambda pose_detector, visualizer, config: 
-        LowerBackRotationTest(pose_detector, visualizer, config, side="left"),
+        EnhancedLowerBackRotationTest(pose_detector, visualizer, config, side="left"),
     "lower_back_rotation_right": lambda pose_detector, visualizer, config: 
-        LowerBackRotationTest(pose_detector, visualizer, config, side="right")
+        EnhancedLowerBackRotationTest(pose_detector, visualizer, config, side="right")
 }
 
 # Track active connections
@@ -93,340 +93,7 @@ active_connections = {}
 # LLM API integration
 LLM_API_URL = os.environ.get("LLM_API_URL", "http://localhost:8001/analyze")
 
-
-# HTML content for the WebSocket client
-html_client = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ROM Assessment</title>
-    <style>
-        body { 
-            font-family: Arial, sans-serif; 
-            margin: 0; 
-            padding: 20px; 
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-        }
-        .header {
-            background-color: #333;
-            color: white;
-            padding: 20px;
-            border-radius: 8px;
-        }
-        .video-container {
-            display: flex;
-            gap: 20px;
-            flex-wrap: wrap;
-        }
-        .video-box {
-            flex: 1;
-            min-width: 480px;
-            background-color: #fff;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 15px;
-        }
-        .data-container {
-            flex: 1;
-            min-width: 320px;
-            background-color: #fff;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            padding: 15px;
-        }
-        .controls {
-            display: flex;
-            gap: 10px;
-            margin-bottom: 15px;
-        }
-        select, button {
-            padding: 10px;
-            border-radius: 4px;
-            border: 1px solid #ddd;
-        }
-        button {
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            cursor: pointer;
-            transition: background-color 0.3s;
-        }
-        button:hover {
-            background-color: #45a049;
-        }
-        button:disabled {
-            background-color: #cccccc;
-            cursor: not-allowed;
-        }
-        video, canvas {
-            width: 100%;
-            border-radius: 4px;
-            background-color: #000;
-        }
-        pre {
-            background-color: #f8f8f8;
-            padding: 10px;
-            border-radius: 4px;
-            overflow-x: auto;
-            white-space: pre-wrap;
-        }
-        .status {
-            font-weight: bold;
-            margin-bottom: 10px;
-        }
-        .status.connected {
-            color: #4CAF50;
-        }
-        .status.disconnected {
-            color: #f44336;
-        }
-        .footer {
-            margin-top: 30px;
-            text-align: center;
-            color: #666;
-        }
-        .permission-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background-color: rgba(0,0,0,0.8);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-            color: white;
-            text-align: center;
-            padding: 20px;
-        }
-        .permission-overlay button {
-            margin-top: 20px;
-            padding: 15px 30px;
-            font-size: 18px;
-        }
-    </style>
-</head>
-<body>
-    <div id="permissionOverlay" class="permission-overlay">
-        <h2>Camera Access Required</h2>
-        <p>This application needs access to your camera to perform ROM assessment.</p>
-        <p>Please click the button below and accept the camera permission request.</p>
-        <button id="requestPermission">Grant Camera Access</button>
-    </div>
-
-    <div class="container">
-        <div class="header">
-            <h1>ROM Assessment</h1>
-            <p>Select an assessment type and follow the on-screen instructions.</p>
-        </div>
-        
-        <div class="video-container">
-            <div class="video-box">
-                <div class="controls">
-                    <select id="testType">
-                        <option value="lower_back_flexion">Lower Back Flexion</option>
-                        <option value="lower_back_extension">Lower Back Extension</option>
-                        <option value="lower_back_lateral_flexion_left">Lower Back Lateral Flexion (Left)</option>
-                        <option value="lower_back_lateral_flexion_right">Lower Back Lateral Flexion (Right)</option>
-                        <option value="lower_back_rotation_left">Lower Back Rotation (Left)</option>
-                        <option value="lower_back_rotation_right">Lower Back Rotation (Right)</option>
-                    </select>
-                    <button id="startAssessment">Start Assessment</button>
-                    <button id="stopAssessment" disabled>Stop</button>
-                </div>
-                <div class="status disconnected" id="connectionStatus">Status: Disconnected</div>
-                <video id="videoInput" autoplay playsinline style="display:none;"></video>
-                <canvas id="canvasOutput"></canvas>
-            </div>
-            
-            <div class="data-container">
-                <h3>Assessment Data</h3>
-                <pre id="assessmentData">No data available</pre>
-            </div>
-        </div>
-        
-        <div class="footer">
-            <p>ROM Assessment System &copy; 2025</p>
-        </div>
-    </div>
-
-    <script>
-        const video = document.getElementById('videoInput');
-        const canvas = document.getElementById('canvasOutput');
-        const ctx = canvas.getContext('2d');
-        const statusElement = document.getElementById('connectionStatus');
-        const dataElement = document.getElementById('assessmentData');
-        const testTypeSelect = document.getElementById('testType');
-        const startButton = document.getElementById('startAssessment');
-        const stopButton = document.getElementById('stopAssessment');
-        const permissionOverlay = document.getElementById('permissionOverlay');
-        const requestPermissionButton = document.getElementById('requestPermission');
-        
-        let ws = null;
-        let stream = null;
-        let assessmentRunning = false;
-        
-        // Handle permission request
-        requestPermissionButton.addEventListener('click', async () => {
-            try {
-                stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                        facingMode: 'user'
-                    } 
-                });
-                video.srcObject = stream;
-                permissionOverlay.style.display = 'none';
-                
-                // Set canvas dimensions based on video
-                video.addEventListener('loadedmetadata', () => {
-                    canvas.width = video.videoWidth;
-                    canvas.height = video.videoHeight;
-                });
-            } catch (err) {
-                console.error('Error accessing camera:', err);
-                alert('Camera access is required for this application. Please allow camera access and refresh the page.');
-            }
-        });
-        
-        // Start assessment
-        startButton.addEventListener('click', () => {
-            if (!stream) {
-                alert('Camera access is required. Please grant permission first.');
-                return;
-            }
-            
-            const testType = testTypeSelect.value;
-            startAssessment(testType);
-        });
-        
-        // Stop assessment
-        stopButton.addEventListener('click', () => {
-            stopAssessment();
-        });
-        
-        async function startAssessment(testType) {
-            if (assessmentRunning) {
-                stopAssessment();
-            }
-            
-            try {
-                // Connect to WebSocket
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${protocol}//${window.location.host}/api/assessment/${testType}`;
-                
-                ws = new WebSocket(wsUrl);
-                
-                ws.onopen = () => {
-                    statusElement.textContent = 'Status: Connected';
-                    statusElement.className = 'status connected';
-                    assessmentRunning = true;
-                    startButton.disabled = true;
-                    stopButton.disabled = false;
-                    sendFrames();
-                };
-                
-                ws.onmessage = (event) => {
-                    const data = JSON.parse(event.data);
-                    
-                    // Update canvas with processed frame
-                    if (data.image) {
-                        const image = new Image();
-                        image.onload = () => {
-                            ctx.clearRect(0, 0, canvas.width, canvas.height);
-                            ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-                        };
-                        image.src = data.image;
-                    }
-                    
-                    // Update assessment data
-                    if (data.rom_data) {
-                        dataElement.textContent = JSON.stringify(data.rom_data, null, 2);
-                        
-                        // If assessment is completed, stop it
-                        if (data.rom_data.status === 'completed') {
-                            setTimeout(() => {
-                                if (assessmentRunning) {
-                                    stopAssessment();
-                                    alert('Assessment completed successfully!');
-                                }
-                            }, 2000);
-                        }
-                    }
-                };
-                
-                ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                    statusElement.textContent = 'Status: Error';
-                    statusElement.className = 'status disconnected';
-                };
-                
-                ws.onclose = () => {
-                    statusElement.textContent = 'Status: Disconnected';
-                    statusElement.className = 'status disconnected';
-                    assessmentRunning = false;
-                    startButton.disabled = false;
-                    stopButton.disabled = true;
-                };
-            } catch (error) {
-                console.error('Error starting assessment:', error);
-                alert('Failed to start assessment. Please try again.');
-            }
-        }
-        
-        function stopAssessment() {
-            if (ws) {
-                ws.close();
-            }
-            assessmentRunning = false;
-            startButton.disabled = false;
-            stopButton.disabled = true;
-        }
-        
-        function sendFrames() {
-            if (!assessmentRunning || !ws) return;
-            
-            // Capture frame from video and send to server
-            const canvasTmp = document.createElement('canvas');
-            canvasTmp.width = video.videoWidth;
-            canvasTmp.height = video.videoHeight;
-            const ctxTmp = canvasTmp.getContext('2d');
-            
-            ctxTmp.drawImage(video, 0, 0, canvasTmp.width, canvasTmp.height);
-            const frameData = canvasTmp.toDataURL('image/jpeg', 0.8);
-            
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(frameData);
-            }
-            
-            // Schedule next frame
-            setTimeout(sendFrames, 100); // 10 FPS
-        }
-    </script>
-</body>
-</html>
-"""
-
-
 # Routes
-@app.get("/")
-async def get_home():
-    """Return the home page with WebSocket client."""
-    return HTMLResponse(html_client)
-
-
 @app.get("/api/tests")
 async def get_available_tests():
     """Get a list of available ROM tests."""
@@ -464,6 +131,9 @@ async def configure_assessment(config: AssessmentConfig):
 @app.websocket("/api/assessment/{test_type}")
 async def assessment_websocket(websocket: WebSocket, test_type: str):
     """WebSocket endpoint for real-time ROM assessment with full configuration support."""
+    # Import asyncio at the handler level to ensure it's available
+    import asyncio
+    
     # Check if test type is valid
     is_custom_test = test_type.startswith("custom_")
     config_manager = ConfigManager()
@@ -471,7 +141,7 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
     available_tests = list(config_manager.config.get("test_defaults", {}).keys())
     custom_tests = list(config_manager.config.get("custom_tests", {}).keys())
     
-    if test_type not in available_tests and test_type not in custom_tests and test_type != "custom":
+    if test_type not in available_tests and test_type not in custom_tests and test_type != "custom" and test_type not in test_factories:
         await websocket.close(code=1008, reason=f"Unsupported test type: {test_type}")
         return
     
@@ -486,6 +156,13 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
     
     # Extract configuration options from query parameters
     config_options = {}
+    
+    # Sports2D configuration options
+    use_sports2d = query_params.get("use_sports2d", "true").lower() == "true"
+    sports2d_mode = query_params.get("mode", "balanced")
+    sports2d_model = query_params.get("pose_model", "body_with_feet")
+    device = query_params.get("device", "auto")
+    backend = query_params.get("backend", "auto")
     
     # Pose detection options
     if "model_type" in query_params:
@@ -582,17 +259,44 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
         
         # Initialize visualizer with theme from config
         theme = config_options.get("theme", "dark")
+        from rom.utils.visualization import EnhancedVisualizer
         visualizer = EnhancedVisualizer(theme=theme)
         
-        # Initialize pose detector with configuration
-        pose_detector = PoseDetector(
-            model_type=config_options.get("model_type", "HALPE_26"),
-            det_frequency=config_options.get("det_frequency", 4),
-            tracking_mode=config_options.get("tracking_mode", "sports2d"),
-            keypoint_likelihood_threshold=config_options.get("keypoint_likelihood_threshold", 0.3),
-            average_likelihood_threshold=config_options.get("average_likelihood_threshold", 0.5),
-            keypoint_number_threshold=config_options.get("keypoint_number_threshold", 0.3)
-        )
+        # Try to initialize the pose detector with error handling
+        try:
+            pose_detector = PoseDetector(
+                model_type=config_options.get("model_type", sports2d_model),
+                det_frequency=config_options.get("det_frequency", 4),
+                tracking_mode=config_options.get("tracking_mode", "sports2d"),
+                keypoint_likelihood_threshold=config_options.get("keypoint_likelihood_threshold", 0.3),
+                average_likelihood_threshold=config_options.get("average_likelihood_threshold", 0.5),
+                keypoint_number_threshold=config_options.get("keypoint_number_threshold", 0.3),
+                mode=sports2d_mode, 
+                backend=backend,
+                device=device,
+                use_sports2d=use_sports2d
+            )
+            
+            # Verify the detector works by processing a test frame
+            test_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+            _ = pose_detector.detect_pose(test_frame)
+            logger.info("Pose detector initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing pose detector: {e}")
+            # Fall back to a simpler pose detector if available
+            try:
+                from rom.utils.fallback_pose_detector import FallbackPoseDetector
+                pose_detector = FallbackPoseDetector()
+                logger.info("Using fallback pose detector due to initialization error")
+            except ImportError:
+                logger.error("Fallback pose detector not available")
+                await websocket.send_text(json.dumps({
+                    "error": f"Failed to initialize pose detector: {str(e)}",
+                    "message": "Try disabling Sports2D or using a different model"
+                }))
+                await websocket.close(code=1011, reason="Failed to initialize pose detection")
+                return
         
         # Create appropriate test instance
         if test_type == "custom" or body_parts or joint_angles or segment_angles:
@@ -640,6 +344,27 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
                 # Use registered test factory
                 test_instance = test_factories[test_type](pose_detector, visualizer, test_config)
         
+        # Helper function to process frames with timeout
+        async def process_frame_with_timeout(frame, timeout=5.0):
+            try:
+                # Create a wrapper function that runs in a thread pool
+                def process_wrapper():
+                    return test_instance.process_frame(frame)
+                
+                # Run the processing with a timeout
+                return await asyncio.wait_for(
+                    asyncio.to_thread(process_wrapper),
+                    timeout=timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Frame processing timed out after {timeout} seconds")
+                # Return original frame and error status
+                return frame.copy(), {"status": "error", "error": "Processing timeout"}
+            except Exception as e:
+                logger.error(f"Error in frame processing: {str(e)}")
+                # Return original frame and error status
+                return frame.copy(), {"status": "error", "error": str(e)}
+        
         # Process frames from WebSocket
         while True:
             try:
@@ -655,14 +380,30 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 
                 if frame is None or frame.size == 0:
+                    logger.warning("Received empty frame")
                     continue
                 
-                # Process frame
-                processed_frame, rom_data = test_instance.process_frame(frame)
+                # Process frame with timeout protection
+                logger.info(f"Processing frame: shape={frame.shape}")
+                processed_frame, rom_data = await process_frame_with_timeout(frame)
+                logger.info(f"Frame processed: status={rom_data.get('status', 'unknown')}")
+                
+                # Ensure we have a valid processed frame
+                if processed_frame is None or processed_frame.size == 0:
+                    logger.error("Processed frame is None or empty")
+                    processed_frame = frame.copy()
                 
                 # Encode processed frame
-                _, buffer = cv2.imencode(".jpg", processed_frame)
-                processed_b64 = base64.b64encode(buffer).decode("utf-8")
+                try:
+                    _, buffer = cv2.imencode(".jpg", processed_frame)
+                    processed_b64 = base64.b64encode(buffer).decode("utf-8")
+                    logger.info(f"Image encoded, size: {len(processed_b64)} bytes")
+                except Exception as encode_error:
+                    logger.error(f"Error encoding processed frame: {str(encode_error)}")
+                    # Use original frame as fallback
+                    _, buffer = cv2.imencode(".jpg", frame)
+                    processed_b64 = base64.b64encode(buffer).decode("utf-8")
+                    logger.info(f"Using original frame as fallback, size: {len(processed_b64)} bytes")
                 
                 # Prepare response data
                 response_data = {
@@ -745,6 +486,9 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
                 
                 # Send response
                 await websocket.send_text(json.dumps(response_data))
+                
+                # Add a small delay to prevent overwhelming the CPU
+                await asyncio.sleep(0.05)
             
             except WebSocketDisconnect:
                 logger.info(f"Client disconnected: {connection_id}")
@@ -779,159 +523,56 @@ async def assessment_websocket(websocket: WebSocket, test_type: str):
             pass
         
         logger.info(f"Closed assessment session: {test_type} ({connection_id})")
-# @app.websocket("/api/assessment/{test_type}")
-# async def assessment_websocket(websocket: WebSocket, test_type: str):
-#     """WebSocket endpoint for real-time ROM assessment with enhanced visualization."""
-#     if test_type not in test_factories:
-#         await websocket.close(code=1008, reason=f"Unsupported test type: {test_type}")
-#         return
-    
-#     await websocket.accept()
-    
-#     # Generate unique connection ID
-#     connection_id = f"conn_{int(time.time())}_{id(websocket)}"
-#     active_connections[connection_id] = websocket
-    
-#     # Initialize components
-#     pose_detector = PoseDetector()
-#     visualizer = EnhancedVisualizer()
-    
-#     # Get query parameters
-#     query_params = dict(websocket.query_params)
-#     body_parts = query_params.get("body_parts", "").split(",") if "body_parts" in query_params else []
-#     primary_angle = query_params.get("primary_angle")
-    
-#     # Create appropriate test instance based on parameters
-#     if body_parts:
-#         # Create custom test with specified body parts
-#         from rom.core.custom_test_factory import CustomTestFactory
+
+async def send_processed_frame(websocket, processed_frame, rom_data):
+    """Helper function to send a processed frame and ROM data to the client."""
+    try:
+        # Encode processed frame
+        _, buffer = cv2.imencode(".jpg", processed_frame)
+        processed_b64 = base64.b64encode(buffer).decode("utf-8")
         
-#         # Create custom joint angle definitions if needed
-#         joint_angles = []
-#         if "angle_points" in query_params:
-#             angle_points = query_params["angle_points"].split(";")
-#             for i, points in enumerate(angle_points):
-#                 point_names = points.split(",")
-#                 if len(point_names) == 3:
-#                     joint_angles.append({
-#                         "name": f"custom_angle_{i}",
-#                         "points": point_names
-#                     })
+        # Prepare response data
+        response_data = {
+            "image": f"data:image/jpeg;base64,{processed_b64}",
+            "rom_data": rom_data
+        }
         
-#         test_instance = CustomTestFactory.create_test(
-#             body_parts,
-#             joint_angles=joint_angles,
-#             primary_angle=primary_angle or (joint_angles[0]["name"] if joint_angles else None),
-#             pose_detector=pose_detector,
-#             visualizer=visualizer
-#         )
-#     else:
-#         # Create standard test
-#         test_instance = test_factories[test_type](pose_detector, visualizer, {})
-    
-#     # ... (rest of the WebSocket handler implementation remains the same) TODO
-    
-#     # Create appropriate test instance
-#     # test_instance = test_factories[test_type](pose_detector, visualizer, {})
-    
-#     # Initialize HTTP client for LLM API
-#     async_client = httpx.AsyncClient(timeout=10.0)
-    
-#     try:
-#         logger.info(f"Started assessment session: {test_type} ({connection_id})")
+        # If assessment is completed, add analysis
+        if rom_data.get("status") == "completed" and "rom" in rom_data:
+            try:
+                # Create comprehensive assessment data
+                assessment_data = {
+                    "timestamp": datetime.now().isoformat(),
+                    "rom_data": rom_data
+                }
+                
+                # Generate analysis if analyzer is available
+                try:
+                    from rom.analysis.assessment_analyzer import AssessmentAnalyzer
+                    analyzer = AssessmentAnalyzer()
+                    
+                    # Get angle history from test instance
+                    angle_history = {}
+                    
+                    analysis_result = analyzer.analyze_assessment(
+                        rom_data,
+                        angle_history
+                    )
+                    
+                    response_data["analysis"] = analysis_result
+                except ImportError:
+                    logger.warning("AssessmentAnalyzer not available")
+                
+            except Exception as analysis_error:
+                logger.error(f"Error generating analysis: {str(analysis_error)}")
+                response_data["analysis_error"] = str(analysis_error)
         
-#         while True:
-#             try:
-#                 # Receive frame from client
-#                 data = await websocket.receive_text()
-                
-#                 # Decode base64 image
-#                 if not data.startswith("data:image"):
-#                     continue
-                
-#                 image_data = base64.b64decode(data.split(",")[1])
-#                 nparr = np.frombuffer(image_data, np.uint8)
-#                 frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-#                 if frame is None or frame.size == 0:
-#                     continue
-                
-#                 # Process frame with appropriate test
-#                 processed_frame, rom_data = test_instance.process_frame(frame)
-                
-#                 # Encode processed frame
-#                 _, buffer = cv2.imencode(".jpg", processed_frame)
-#                 processed_b64 = base64.b64encode(buffer).decode("utf-8")
-                
-#                 # Prepare response
-#                 response_data = {
-#                     "image": f"data:image/jpeg;base64,{processed_b64}",
-#                     "rom_data": rom_data
-#                 }
-                
-#                 # If assessment is completed, send data to LLM API
-#                 if rom_data.get("status") == "completed" and "rom" in rom_data:
-#                     try:
-#                         llm_response = await async_client.post(
-#                             LLM_API_URL,
-#                             json={
-#                                 "assessment_type": test_type,
-#                                 "rom_data": rom_data,
-#                                 "timestamp": datetime.now().isoformat()
-#                             }
-#                         )
-                        
-#                         if llm_response.status_code == 200:
-#                             response_data["llm_analysis"] = llm_response.json()
-#                         else:
-#                             logger.warning(f"LLM API returned status code {llm_response.status_code}")
-#                             response_data["llm_analysis"] = {
-#                                 "error": "Failed to get analysis from LLM API",
-#                                 "status_code": llm_response.status_code
-#                             }
-#                     except Exception as e:
-#                         logger.error(f"Error contacting LLM API: {str(e)}")
-#                         response_data["llm_analysis"] = {
-#                             "error": "Failed to get analysis from LLM API",
-#                             "message": str(e)
-#                         }
-                
-#                 # Send response
-#                 await websocket.send_text(json.dumps(response_data))
-                
-#             except WebSocketDisconnect:
-#                 logger.info(f"Client disconnected: {connection_id}")
-#                 break
-                
-#             except Exception as e:
-#                 logger.error(f"Error processing frame: {str(e)}")
-#                 try:
-#                     await websocket.send_text(json.dumps({
-#                         "error": str(e),
-#                         "message": "Error processing frame"
-#                     }))
-#                 except:
-#                     break
+        # Send response
+        await websocket.send_text(json.dumps(response_data))
     
-#     except Exception as e:
-#         logger.error(f"Unexpected error in WebSocket handler: {str(e)}")
-    
-#     finally:
-#         # Clean up
-#         if connection_id in active_connections:
-#             del active_connections[connection_id]
-        
-#         try:
-#             await async_client.aclose()
-#         except:
-#             pass
-            
-#         try:
-#             await websocket.close()
-#         except:
-#             pass
-            
-#         logger.info(f"Closed assessment session: {test_type} ({connection_id})")
+    except Exception as e:
+        logger.error(f"Error sending processed frame: {str(e)}")
+        raise
 
 
 @app.get("/api/health")
@@ -941,85 +582,6 @@ async def health_check():
         "status": "ok",
         "version": "1.0.0",
         "active_connections": len(active_connections)
-    }
-
-@app.post("/api/custom_angles")
-async def create_custom_angle_definition(
-    body_parts: List[str] = Body(..., description="List of body part names to track"),
-    joint_angles: Optional[List[Dict[str, Any]]] = Body(None, description="Joint angle definitions"),
-    segment_angles: Optional[List[Dict[str, Any]]] = Body(None, description="Segment angle definitions")
-):
-    """
-    Create a custom angle definition for assessment.
-    
-    This endpoint allows defining custom body parts and angles for ROM assessment.
-    """
-    # Validate body parts
-    valid_parts = set(PoseDetector().keypoint_mapping.keys())
-    for part in body_parts:
-        if part not in valid_parts:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid body part: {part}. Valid parts are: {', '.join(sorted(valid_parts))}"
-            )
-    
-    # Validate joint angles
-    if joint_angles:
-        for angle in joint_angles:
-            if "name" not in angle or "points" not in angle:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Joint angles must have 'name' and 'points' fields"
-                )
-            
-            if len(angle["points"]) != 3:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Joint angle '{angle['name']}' must have exactly 3 points"
-                )
-            
-            for point in angle["points"]:
-                if point not in valid_parts:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid point '{point}' in angle '{angle['name']}'"
-                    )
-    
-    # Validate segment angles
-    if segment_angles:
-        for angle in segment_angles:
-            if "name" not in angle or "points" not in angle:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Segment angles must have 'name' and 'points' fields"
-                )
-            
-            if len(angle["points"]) != 2:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Segment angle '{angle['name']}' must have exactly 2 points"
-                )
-            
-            for point in angle["points"]:
-                if point not in valid_parts:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid point '{point}' in angle '{angle['name']}'"
-                    )
-    
-    # Generate a unique ID for this angle definition
-    definition_id = f"angle_def_{int(time.time())}"
-    
-    # In a production system, you would store this in a database
-    # For now, we'll just return the ID
-    
-    return {
-        "status": "success",
-        "definition_id": definition_id,
-        "body_parts": body_parts,
-        "joint_angles": joint_angles or [],
-        "segment_angles": segment_angles or [],
-        "websocket_url": f"/api/assessment/custom?definition_id={definition_id}"
     }
 
 @app.post("/api/analyze")
@@ -1082,9 +644,9 @@ async def analyze_assessment(data: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# For direct execution
 if __name__ == "__main__":
     import argparse
+    import asyncio
     
     parser = argparse.ArgumentParser(description="ROM Assessment API Server")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the server to")
@@ -1102,6 +664,6 @@ if __name__ == "__main__":
         host=args.host, 
         port=args.port, 
         reload=args.reload,
-        log_level="info",
+        log_level="info" if not args.debug else "debug",
         access_log=True
     )

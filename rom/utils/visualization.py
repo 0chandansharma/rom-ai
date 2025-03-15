@@ -183,7 +183,7 @@ class EnhancedVisualizer:
     
     def put_text(self, frame: np.ndarray, text: str, position: Tuple[int, int], 
                 color: str = 'white', scale: float = 0.8, thickness: int = 2,
-                background: bool = True, align: str = 'left') -> None:
+                background: bool = True, align: str = 'left') -> np.ndarray:
         """
         Put text on the frame with better readability.
         
@@ -196,7 +196,13 @@ class EnhancedVisualizer:
             thickness: Text thickness
             background: Whether to add background box
             align: Text alignment ('left', 'center', 'right')
+        
+        Returns:
+            Modified video frame with text added
         """
+        # Create a copy of the frame to avoid modifying the original
+        annotated_frame = frame.copy()
+        # print("annotated_frame", len(annotated_frame))
         if color in self.colors:
             color_value = self.colors[color]
         else:
@@ -215,7 +221,7 @@ class EnhancedVisualizer:
         # Add a dark background for better readability
         if background:
             cv2.rectangle(
-                frame, 
+                annotated_frame, 
                 (x - 5, y - text_height - 5), 
                 (x + text_width + 5, y + 5), 
                 self.colors['black'], 
@@ -224,7 +230,7 @@ class EnhancedVisualizer:
         
         # Draw the text
         cv2.putText(
-            frame, 
+            annotated_frame, 
             text, 
             (x, y), 
             self.font, 
@@ -233,6 +239,8 @@ class EnhancedVisualizer:
             thickness, 
             cv2.LINE_AA
         )
+        print("annotated_frame", len(annotated_frame))
+        return annotated_frame
     
     def draw_angle(self, frame: np.ndarray, p1: Tuple[float, float], p2: Tuple[float, float], 
                   p3: Tuple[float, float], angle_value: float, color: str = 'info',

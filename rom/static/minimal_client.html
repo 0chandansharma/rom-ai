@@ -1,0 +1,806 @@
+<!-- rom/static/enhanced_debug_client.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ROM Assessment Debug Client</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .header {
+            background-color: #333;
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .video-container {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        .video-box {
+            flex: 1;
+            min-width: 480px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 15px;
+        }
+        .data-container {
+            flex: 1;
+            min-width: 320px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            padding: 15px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+        }
+        select, button, input {
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        video, canvas {
+            width: 100%;
+            border-radius: 4px;
+            background-color: #000;
+        }
+        pre {
+            background-color: #f8f8f8;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+        }
+        .status {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .status.connected {
+            color: #4CAF50;
+        }
+        .status.disconnected {
+            color: #f44336;
+        }
+        .footer {
+            margin-top: 30px;
+            text-align: center;
+            color: #666;
+        }
+        .permission-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0,0,0,0.8);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            color: white;
+            text-align: center;
+            padding: 20px;
+        }
+        .permission-overlay button {
+            margin-top: 20px;
+            padding: 15px 30px;
+            font-size: 18px;
+        }
+        .debug-panel {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-container {
+            height: 150px;
+            overflow-y: auto;
+            background-color: #000;
+            color: #0f0;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            margin-top: 10px;
+        }
+        .log-entry {
+            margin: 2px 0;
+            word-wrap: break-word;
+        }
+        .log-entry.error {
+            color: #f44;
+        }
+        .log-entry.warn {
+            color: #ff0;
+        }
+        .log-entry.info {
+            color: #0f0;
+        }
+        .advanced-options {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #eaeaea;
+            border-radius: 4px;
+        }
+        .option-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .option-row label {
+            flex: 1;
+            margin-right: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="permissionOverlay" class="permission-overlay">
+        <h2>Camera Access Required</h2>
+        <p>This application needs access to your camera to perform ROM assessment.</p>
+        <p>Please click the button below and accept the camera permission request.</p>
+        <button id="requestPermission">Grant Camera Access</button>
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <h1>ROM Assessment - Debug Client</h1>
+            <p>Select an assessment type and follow the on-screen instructions.</p>
+        </div>
+        
+        <div class="video-container">
+            <div class="video-box">
+                <div class="controls">
+                    <select id="testType">
+                        <option value="lower_back_flexion">Lower Back Flexion</option>
+                        <option value="lower_back_extension">Lower Back Extension</option>
+                        <option value="lower_back_lateral_flexion_left">Lower Back Lateral Flexion (Left)</option>
+                        <option value="lower_back_lateral_flexion_right">Lower Back Lateral Flexion (Right)</option>
+                        <option value="lower_back_rotation_left">Lower Back Rotation (Left)</option>
+                        <option value="lower_back_rotation_right">Lower Back Rotation (Right)</option>
+                    </select>
+                    <button id="startAssessment">Start Assessment</button>
+                    <button id="stopAssessment" disabled>Stop</button>
+                    <button id="useTestVideo">Use Test Video</button>
+                    <button id="takeSingleFrame">Take Single Frame</button>
+                </div>
+                <div class="status disconnected" id="connectionStatus">Status: Disconnected</div>
+                <video id="videoInput" autoplay playsinline style="display:none;"></video>
+                <canvas id="canvasOutput"></canvas>
+                
+                <!-- Debug panel for canvas information -->
+                <div class="debug-panel">
+                    <div>Video dimensions: <span id="videoDimensions">Not available</span></div>
+                    <div>Canvas dimensions: <span id="canvasDimensions">Not available</span></div>
+                    <div>Last frame time: <span id="lastFrameTime">Not available</span></div>
+                    <div>Frames sent: <span id="framesSent">0</span></div>
+                    <div>Frames received: <span id="framesReceived">0</span></div>
+                    <div>FPS: <span id="fps">0</span></div>
+                    
+                    <div class="advanced-options">
+                        <h4>Advanced Options</h4>
+                        <div class="option-row">
+                            <label for="useSports2d">Use Sports2D:</label>
+                            <input type="checkbox" id="useSports2d" checked>
+                        </div>
+                        <div class="option-row">
+                            <label for="imageSendQuality">Image Send Quality (0.1-1.0):</label>
+                            <input type="range" id="imageSendQuality" min="0.1" max="1.0" step="0.1" value="0.8">
+                            <span id="qualityValue">0.8</span>
+                        </div>
+                        <div class="option-row">
+                            <label for="imageResizeRatio">Image Resize Ratio (0.1-1.0):</label>
+                            <input type="range" id="imageResizeRatio" min="0.1" max="1.0" step="0.1" value="1.0">
+                            <span id="resizeValue">1.0</span>
+                        </div>
+                        <div class="option-row">
+                            <label for="sendFrequency">Send Frequency (ms):</label>
+                            <input type="number" id="sendFrequency" min="50" max="1000" step="10" value="100">
+                        </div>
+                    </div>
+                </div>
+                
+                <h4>Debug Log</h4>
+                <div class="log-container" id="logContainer"></div>
+            </div>
+            
+            <div class="data-container">
+                <h3>Assessment Data</h3>
+                <pre id="assessmentData">No data available</pre>
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p>ROM Assessment System &copy; 2025</p>
+        </div>
+    </div>
+
+    <script>
+        // Debug logger
+        const logContainer = document.getElementById('logContainer');
+        function log(message, type = 'info') {
+            console.log(`[${type.toUpperCase()}] ${message}`);
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `${new Date().toLocaleTimeString()} [${type}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+            
+            // Limit log entries
+            while (logContainer.children.length > 100) {
+                logContainer.removeChild(logContainer.firstChild);
+            }
+        }
+        
+        window.onerror = function(message, source, lineno, colno, error) {
+            log(`Error: ${message} at ${source}:${lineno}:${colno}`, 'error');
+            return false;
+        };
+        
+        // DOM elements
+        const video = document.getElementById('videoInput');
+        const canvas = document.getElementById('canvasOutput');
+        const ctx = canvas.getContext('2d');
+        const statusElement = document.getElementById('connectionStatus');
+        const dataElement = document.getElementById('assessmentData');
+        const testTypeSelect = document.getElementById('testType');
+        const startButton = document.getElementById('startAssessment');
+        const stopButton = document.getElementById('stopAssessment');
+        const permissionOverlay = document.getElementById('permissionOverlay');
+        const requestPermissionButton = document.getElementById('requestPermission');
+        const useTestVideoButton = document.getElementById('useTestVideo');
+        const takeSingleFrameButton = document.getElementById('takeSingleFrame');
+        
+        // Debug elements
+        const videoDimensionsEl = document.getElementById('videoDimensions');
+        const canvasDimensionsEl = document.getElementById('canvasDimensions');
+        const lastFrameTimeEl = document.getElementById('lastFrameTime');
+        const framesSentEl = document.getElementById('framesSent');
+        const framesReceivedEl = document.getElementById('framesReceived');
+        const fpsEl = document.getElementById('fps');
+        
+        // Advanced options
+        const useSports2dCheckbox = document.getElementById('useSports2d');
+        const imageSendQualitySlider = document.getElementById('imageSendQuality');
+        const qualityValueSpan = document.getElementById('qualityValue');
+        const imageResizeRatioSlider = document.getElementById('imageResizeRatio');
+        const resizeValueSpan = document.getElementById('resizeValue');
+        const sendFrequencyInput = document.getElementById('sendFrequency');
+        
+        // Update quality display
+        imageSendQualitySlider.addEventListener('input', () => {
+            qualityValueSpan.textContent = imageSendQualitySlider.value;
+        });
+        
+        // Update resize display
+        imageResizeRatioSlider.addEventListener('input', () => {
+            resizeValueSpan.textContent = imageResizeRatioSlider.value;
+        });
+        
+        let ws = null;
+        let stream = null;
+        let assessmentRunning = false;
+        let lastFrameTime = 0;
+        let framesSent = 0;
+        let framesReceived = 0;
+        let lastFpsUpdate = Date.now();
+        let fpsCounter = 0;
+        let sendFramesInterval = null;
+        
+        // Initialize canvas with some dimensions
+        canvas.width = 640;
+        canvas.height = 480;
+        canvasDimensionsEl.textContent = `${canvas.width} x ${canvas.height}`;
+        
+        // Clear canvas with color to show it's working
+        ctx.fillStyle = '#333';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = 'white';
+        ctx.font = '20px Arial';
+        ctx.fillText('Canvas initialized', 20, canvas.height/2);
+        
+        log('Application initialized', 'info');
+        
+        // Handle permission request
+        requestPermissionButton.addEventListener('click', async () => {
+            try {
+                log('Requesting camera access...', 'info');
+                stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                        facingMode: 'user'
+                    } 
+                });
+                video.srcObject = stream;
+                permissionOverlay.style.display = 'none';
+                
+                log('Camera access granted', 'info');
+                
+                // Log video element properties
+                console.log("Video element properties after setting srcObject:");
+                console.log("- videoWidth:", video.videoWidth);
+                console.log("- videoHeight:", video.videoHeight);
+                
+                // Make sure canvas gets proper dimensions from video
+                video.addEventListener('loadedmetadata', () => {
+                    log(`Video dimensions on loadedmetadata: ${video.videoWidth} x ${video.videoHeight}`, 'info');
+                    
+                    if (video.videoWidth && video.videoHeight) {
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        
+                        // Update debug info
+                        videoDimensionsEl.textContent = `${video.videoWidth} x ${video.videoHeight}`;
+                        canvasDimensionsEl.textContent = `${canvas.width} x ${canvas.height}`;
+                        
+                        // Draw placeholder
+                        ctx.fillStyle = '#333';
+                        ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        ctx.fillStyle = 'white';
+                        ctx.font = '20px Arial';
+                        ctx.fillText('Camera ready - Press Start Assessment', 20, canvas.height/2);
+                    } else {
+                        log("Video dimensions are not available", 'error');
+                    }
+                });
+                
+                // Also check if video is already loaded
+                if (video.readyState >= 2) {
+                    log(`Video already loaded, dimensions: ${video.videoWidth} x ${video.videoHeight}`, 'info');
+                    
+                    canvas.width = video.videoWidth || 640;
+                    canvas.height = video.videoHeight || 480;
+                    
+                    // Update debug info
+                    videoDimensionsEl.textContent = `${video.videoWidth} x ${video.videoHeight}`;
+                    canvasDimensionsEl.textContent = `${canvas.width} x ${canvas.height}`;
+                }
+            } catch (err) {
+                log(`Error accessing camera: ${err.message}`, 'error');
+                alert('Camera access is required for this application. Please allow camera access and refresh the page.');
+            }
+        });
+        
+        // Start assessment
+        startButton.addEventListener('click', () => {
+            if (!stream && !useTestVideoButton.getAttribute('data-test-mode')) {
+                log('No camera access. Grant permission or use test video.', 'warn');
+                alert('Camera access is required. Please grant permission first.');
+                return;
+            }
+            
+            const testType = testTypeSelect.value;
+            log(`Starting assessment: ${testType}`, 'info');
+            startAssessment(testType);
+        });
+        
+        // Use test video instead of webcam
+        useTestVideoButton.addEventListener('click', () => {
+            useTestVideoButton.setAttribute('data-test-mode', 'true');
+            const testType = testTypeSelect.value;
+            log(`Using test video for ${testType}`, 'info');
+            startAssessmentWithUrl(buildWebSocketUrl(testType, true));
+            permissionOverlay.style.display = 'none';
+        });
+        
+        // Take a single frame for debugging
+        takeSingleFrameButton.addEventListener('click', () => {
+            if (!stream && !useTestVideoButton.getAttribute('data-test-mode')) {
+                log('No camera access. Grant permission first.', 'warn');
+                return;
+            }
+            
+            log('Taking single frame for debugging', 'info');
+            
+            if (stream) {
+                sendSingleFrame();
+            } else {
+                // Use a test frame
+                const testFrame = createTestFrame();
+                sendTestFrame(testFrame);
+            }
+        });
+        
+        // Stop assessment
+        stopButton.addEventListener('click', () => {
+            log('Stopping assessment', 'info');
+            stopAssessment();
+        });
+        
+        function buildWebSocketUrl(testType, useTestVideo) {
+            // Get WebSocket protocol
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            
+            // Build WebSocket URL
+            const host = window.location.host || 'localhost:8000';
+            const wsBaseUrl = `${protocol}//${host}/api/assessment/${testType}`;
+            
+            // Construct URL with query parameters
+            const url = new URL(wsBaseUrl, window.location.href);
+            url.searchParams.append('use_test_video', useTestVideo);
+            url.searchParams.append('use_sports2d', useSports2dCheckbox.checked);
+            
+            log(`Built WebSocket URL: ${url.toString()}`, 'info');
+            return url.toString();
+        }
+        
+        function startAssessmentWithUrl(wsUrl) {
+            if (assessmentRunning) {
+                stopAssessment();
+            }
+            
+            try {
+                log(`Connecting to WebSocket: ${wsUrl}`, 'info');
+                
+                // Reset counters
+                framesSent = 0;
+                framesReceived = 0;
+                framesSentEl.textContent = '0';
+                framesReceivedEl.textContent = '0';
+                fpsEl.textContent = '0';
+                
+                ws = new WebSocket(wsUrl);
+                
+                ws.onopen = () => {
+                    log("WebSocket connection established", 'info');
+                    statusElement.textContent = 'Status: Connected';
+                    statusElement.className = 'status connected';
+                    assessmentRunning = true;
+                    startButton.disabled = true;
+                    stopButton.disabled = false;
+                    
+                    if (stream) {
+                        // Start sending frames
+                        startSendingFrames();
+                    }
+                };
+                
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        // Update counters
+                        framesReceived++;
+                        framesReceivedEl.textContent = framesReceived;
+                        
+                        // Calculate FPS
+                        fpsCounter++;
+                        const now = Date.now();
+                        if (now - lastFpsUpdate >= 1000) {
+                            fpsEl.textContent = Math.round(fpsCounter * 1000 / (now - lastFpsUpdate));
+                            fpsCounter = 0;
+                            lastFpsUpdate = now;
+                        }
+                        
+                        // Update debug info
+                        lastFrameTime = new Date().toLocaleTimeString();
+                        lastFrameTimeEl.textContent = lastFrameTime;
+                        
+                        // Log status
+                        if (data.rom_data && data.rom_data.status) {
+                            log(`Assessment status: ${data.rom_data.status}`, 'info');
+                        }
+                        
+                        // Update canvas with processed frame
+                        if (data.image) {
+                            const image = new Image();
+                            
+                            // Add load and error handlers
+                            image.onload = () => {
+                                log(`Received image: ${image.width} x ${image.height}`, 'info');
+                                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                                ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+                            };
+                            
+                            image.onerror = (error) => {
+                                log(`Error loading image: ${error.message || 'Unknown error'}`, 'error');
+                                // Display error on canvas
+                                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                                ctx.fillStyle = 'red';
+                                ctx.font = '16px Arial';
+                                ctx.fillText('Failed to load image: ' + (error.message || 'Unknown error'), 20, 50);
+                            };
+                            
+                            image.src = data.image;
+                        } else {
+                            log("No image data in WebSocket message", 'warn');
+                        }
+                        
+                        // Update assessment data
+                        if (data.rom_data) {
+                            dataElement.textContent = JSON.stringify(data.rom_data, null, 2);
+                            
+                            // If assessment is completed, stop it
+                            if (data.rom_data.status === 'completed') {
+                                log('Assessment completed successfully!', 'info');
+                                setTimeout(() => {
+                                    if (assessmentRunning) {
+                                        stopAssessment();
+                                        alert('Assessment completed successfully!');
+                                    }
+                                }, 2000);
+                            }
+                        }
+                        
+                        // Handle errors
+                        if (data.error) {
+                            log(`Server error: ${data.error}`, 'error');
+                        }
+                    } catch (error) {
+                        log(`Error processing WebSocket message: ${error.message}`, 'error');
+                    }
+                };
+                
+                ws.onerror = (error) => {
+                    log(`WebSocket error: ${error.message || 'Unknown error'}`, 'error');
+                    statusElement.textContent = 'Status: Error';
+                    statusElement.className = 'status disconnected';
+                };
+                
+                ws.onclose = (event) => {
+                    log(`WebSocket connection closed: Code ${event.code} - ${event.reason || 'No reason provided'}`, 'info');
+                    statusElement.textContent = `Status: Disconnected (${event.code})`;
+                    statusElement.className = 'status disconnected';
+                    assessmentRunning = false;
+                    startButton.disabled = false;
+                    stopButton.disabled = true;
+                    
+                    // Stop sending frames
+                    if (sendFramesInterval) {
+                        clearInterval(sendFramesInterval);
+                        sendFramesInterval = null;
+                    }
+                };
+            } catch (error) {
+                log(`Error starting assessment: ${error.message}`, 'error');
+                alert('Failed to start assessment. Please try again.');
+            }
+        }
+        
+        function startAssessment(testType) {
+            startAssessmentWithUrl(buildWebSocketUrl(testType, false));
+        }
+        
+        function stopAssessment() {
+            if (ws) {
+                ws.close();
+            }
+            
+            if (sendFramesInterval) {
+                clearInterval(sendFramesInterval);
+                sendFramesInterval = null;
+            }
+            
+            assessmentRunning = false;
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            log('Assessment stopped', 'info');
+        }
+        
+        function startSendingFrames() {
+            // Clear any existing interval
+            if (sendFramesInterval) {
+                clearInterval(sendFramesInterval);
+            }
+            
+            // Get send frequency
+            const sendFreq = parseInt(sendFrequencyInput.value) || 100;
+            log(`Starting frame sending at ${sendFreq}ms intervals`, 'info');
+            
+            // Start new interval
+            sendFramesInterval = setInterval(sendFrame, sendFreq);
+        }
+        
+        function sendFrame() {
+            if (!assessmentRunning || !ws || ws.readyState !== WebSocket.OPEN) return;
+            
+            try {
+                // Get resize ratio
+                const resizeRatio = parseFloat(imageResizeRatioSlider.value) || 1.0;
+                
+                // Capture frame from video and send to server
+                const canvasTmp = document.createElement('canvas');
+                canvasTmp.width = video.videoWidth * resizeRatio;
+                canvasTmp.height = video.videoHeight * resizeRatio;
+                const ctxTmp = canvasTmp.getContext('2d');
+                
+                // Update debug info
+                videoDimensionsEl.textContent = `${video.videoWidth} x ${video.videoHeight}`;
+                
+                // Draw frame to temporary canvas
+                ctxTmp.drawImage(video, 0, 0, canvasTmp.width, canvasTmp.height);
+                
+                // Get image quality
+                const imageQuality = parseFloat(imageSendQualitySlider.value) || 0.8;
+                
+                // Convert to JPEG
+                const frameData = canvasTmp.toDataURL('image/jpeg', imageQuality);
+                
+                // Send frame
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(frameData);
+                    framesSent++;
+                    framesSentEl.textContent = framesSent;
+                    
+                    if (framesSent % 10 === 0) {
+                        log(`Sent ${framesSent} frames, latest size: ${Math.round(frameData.length / 1024)} KB`, 'info');
+                    }
+                }
+            } catch (error) {
+                log(`Error sending frame: ${error.message}`, 'error');
+            }
+        }
+        
+        function sendSingleFrame() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('WebSocket not connected. Cannot send frame.', 'warn');
+                return;
+            }
+            
+            try {
+                // Get resize ratio
+                const resizeRatio = parseFloat(imageResizeRatioSlider.value) || 1.0;
+                
+                // Capture frame from video
+                const canvasTmp = document.createElement('canvas');
+                canvasTmp.width = video.videoWidth * resizeRatio;
+                canvasTmp.height = video.videoHeight * resizeRatio;
+                const ctxTmp = canvasTmp.getContext('2d');
+                
+                // Draw frame to temporary canvas
+                ctxTmp.drawImage(video, 0, 0, canvasTmp.width, canvasTmp.height);
+                
+                // Get image quality
+                const imageQuality = parseFloat(imageSendQualitySlider.value) || 0.8;
+                
+                // Convert to JPEG
+                const frameData = canvasTmp.toDataURL('image/jpeg', imageQuality);
+                
+                // Send frame
+                ws.send(frameData);
+                framesSent++;
+                framesSentEl.textContent = framesSent;
+                
+                log(`Sent single frame: ${Math.round(frameData.length / 1024)} KB`, 'info');
+            } catch (error) {
+                log(`Error sending single frame: ${error.message}`, 'error');
+            }
+        }
+        
+        function createTestFrame() {
+            // Create a test frame
+            const canvasTmp = document.createElement('canvas');
+            canvasTmp.width = 640;
+            canvasTmp.height = 480;
+            const ctxTmp = canvasTmp.getContext('2d');
+            
+            // Fill with gray
+            ctxTmp.fillStyle = '#333';
+            ctxTmp.fillRect(0, 0, canvasTmp.width, canvasTmp.height);
+            
+            // Draw some shapes to simulate a person
+            ctxTmp.fillStyle = '#ddd';
+            
+            // Head
+            ctxTmp.beginPath();
+            ctxTmp.arc(canvasTmp.width / 2, 120, 40, 0, Math.PI * 2);
+            ctxTmp.fill();
+            
+            // Body
+            ctxTmp.fillRect(canvasTmp.width / 2 - 20, 160, 40, 160);
+            
+            // Arms
+            ctxTmp.fillRect(canvasTmp.width / 2 - 100, 180, 80, 20);
+            ctxTmp.fillRect(canvasTmp.width / 2 + 20, 180, 80, 20);
+            
+            // Legs
+            ctxTmp.fillRect(canvasTmp.width / 2 - 30, 320, 20, 120);
+            ctxTmp.fillRect(canvasTmp.width / 2 + 10, 320, 20, 120);
+            
+            // Add text
+            ctxTmp.fillStyle = 'white';
+            ctxTmp.font = '20px Arial';
+            ctxTmp.fillText('Test Frame', 10, 30);
+            
+            return canvasTmp;
+        }
+        
+        function sendTestFrame(canvasTmp) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('WebSocket not connected. Cannot send test frame.', 'warn');
+                return;
+            }
+            
+            try {
+                // Get image quality
+                const imageQuality = parseFloat(imageSendQualitySlider.value) || 0.8;
+                
+                // Convert to JPEG
+                const frameData = canvasTmp.toDataURL('image/jpeg', imageQuality);
+                
+                // Send frame
+                ws.send(frameData);
+                framesSent++;
+                framesSentEl.textContent = framesSent;
+                
+                log(`Sent test frame: ${Math.round(frameData.length / 1024)} KB`, 'info');
+            } catch (error) {
+                log(`Error sending test frame: ${error.message}`, 'error');
+            }
+        }
+        
+        // Initialize with debugging placeholder
+        window.addEventListener('load', () => {
+            log("Window loaded", 'info');
+            log(`Canvas dimensions: ${canvas.width} x ${canvas.height}`, 'info');
+            
+            // Create a black background with some text to show the canvas is working
+            ctx.fillStyle = '#333';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Add some test text
+            ctx.fillStyle = '#ddd';
+            ctx.font = '20px Arial';
+            ctx.fillText('Canvas initialized properly', 20, 50);
+            ctx.fillText('Awaiting camera permission...', 20, 80);
+            
+            // Draw visible grid
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            
+            // Vertical lines
+            for (let x = 0; x < canvas.width; x += 50) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, canvas.height);
+                ctx.stroke();
+            }
+            
+            // Horizontal lines
+            for (let y = 0; y < canvas.height; y += 50) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(canvas.width, y);
+                ctx.stroke();
+            }
+            
+            // Draw an orange circle to verify canvas rendering
+            ctx.fillStyle = 'orange';
+            ctx.beginPath();
+            ctx.arc(canvas.width/2, canvas.height/2, 30, 0, Math.PI * 2);
+            ctx.fill();
+        });

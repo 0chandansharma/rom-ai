@@ -515,7 +515,8 @@ try:
         ret, frame = cap.read()
         if not ret:
             st.error("Failed to capture video. Please check your camera connection.")
-            break
+            continue
+            # break
         
         # Process frame
         processed_frame, result_data = process_frame(frame, current_test_type)

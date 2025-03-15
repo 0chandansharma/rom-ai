@@ -1,7 +1,8 @@
 # rom/core/custom_test_factory.py
 from typing import Dict, List, Tuple, Any, Optional, Union
 import numpy as np
-
+import cv2
+import mediapipe as mp
 from rom.core.base import EnhancedROMTest, ROMData, JointType, MovementPlane, AssessmentStatus, Point3D, Angle
 from rom.utils.math_utils import MathUtils
 from rom.tests.lower_back_test import EnhancedLowerBackFlexionTest
