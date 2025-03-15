@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from rom.utils.pose_detector import PoseDetector
 from rom.utils.math_utils import MathUtils
 from rom.core.data_processor import DataProcessor
-
+from rom.utils.visualization import EnhancedVisualizer
 # Setup logging
 logger = logging.getLogger("rom.base")
 
@@ -125,7 +125,7 @@ class EnhancedROMTest(ABC):
     
     def __init__(self, 
                 pose_detector: Optional[PoseDetector] = None,
-                visualizer = None,
+                visualizer = EnhancedVisualizer(),
                 config: Dict[str, Any] = None):
         """
         Initialize a ROM test.
@@ -222,10 +222,10 @@ class EnhancedROMTest(ABC):
         self.frame_count += 1
         h, w, _ = frame.shape
         frame_shape = (h, w, 3)
-        
+        # print("h, w : ",h, w)
         # Find pose landmarks
         all_landmarks = self.pose_detector.find_pose(frame)
-        
+        # print("all_landmarks", all_landmarks)
         if not all_landmarks:
             self.data.guidance_message = "No pose detected. Please make sure your full body is visible."
             self.data.status = AssessmentStatus.FAILED
@@ -250,9 +250,11 @@ class EnhancedROMTest(ABC):
             self.data.guidance_message = "Cannot detect all required body parts. Please step back to show your full body."
             self.data.status = AssessmentStatus.FAILED
             
+            print("frame-----before", len(frame))
             if self.visualizer:
-                frame = self.visualizer.put_text(frame, self.data.guidance_message, (20, 50), color='red')
+                frame = self.visualizer.put_text(frame, self.data.guidance_message, (20, 50), color='red') #ERROR here TODO
             
+            print("frame-----", len(frame))
             return frame, self.data.to_dict()
         
         # Check initial position
@@ -313,8 +315,9 @@ class EnhancedROMTest(ABC):
             self.data_processor.add_angle(angle_name, angle_value)
         
         # Visualize assessment
+        # print("processed_frame_visu_before++++++++++++++++++++++++++++++++++++++++++++++", processed_frame)
         processed_frame = self.visualize_assessment(frame, self.data)
-        
+        # print("processed_frame_visu_after________________________________________________", processed_frame)
         return processed_frame, self.data.to_dict()
     
     def _check_required_landmarks(self, landmarks: Dict[int, Tuple[float, float, float]]) -> bool:

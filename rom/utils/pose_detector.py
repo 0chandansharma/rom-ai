@@ -7,6 +7,9 @@ import logging
 
 logger = logging.getLogger("rom.pose_detector")
 
+# Import the new Sports2D detector
+from rom.utils.sports2d_detector import Sports2DPoseDetector
+
 class PoseDetector:
     """Enhanced pose detector with Sports2D capabilities."""
     
@@ -18,12 +21,16 @@ class PoseDetector:
                  average_likelihood_threshold=0.5,
                  keypoint_number_threshold=0.3,
                  static_image_mode=False,
-                 model_complexity=1):
+                 model_complexity=1,
+                 mode='balanced',
+                 backend='auto',
+                 device='auto',
+                 use_sports2d=True):
         """
         Initialize the pose detector with enhanced features.
         
         Args:
-            model_type: Type of pose model ('HALPE_26', 'COCO_133', 'COCO_17')
+            model_type: Type of pose model ('HALPE_26', 'COCO_133_WRIST', 'COCO_133', 'COCO_17')
             det_frequency: Run detection every N frames (tracking in between)
             tracking_mode: 'sports2d' or 'deepsort'
             keypoint_likelihood_threshold: Minimum confidence for keypoints
@@ -31,36 +38,104 @@ class PoseDetector:
             keypoint_number_threshold: Minimum fraction of keypoints detected
             static_image_mode: Whether to treat input as static images
             model_complexity: Model complexity (0, 1, or 2)
+            mode: 'lightweight', 'balanced', 'performance' - controls model accuracy 
+            backend: 'auto', 'onnxruntime', 'openvino', 'opencv'
+            device: 'auto', 'cpu', 'cuda', 'mps', 'rocm'
+            use_sports2d: Whether to use Sports2D/RTMLib or the default detector
         """
-        self.model_type = model_type.upper()
+        self.use_sports2d = use_sports2d
+        self.model_type = model_type
         self.det_frequency = det_frequency
         self.tracking_mode = tracking_mode
         self.keypoint_likelihood_threshold = keypoint_likelihood_threshold
         self.average_likelihood_threshold = average_likelihood_threshold
         self.keypoint_number_threshold = keypoint_number_threshold
         
-        # Initialize MediaPipe components
-        self.mp_pose = mp.solutions.pose
-        self.mp_drawing = mp.solutions.drawing_utils
-        self.mp_drawing_styles = mp.solutions.drawing_styles
+        if use_sports2d:
+            # Initialize Sports2D detector
+            self.sports2d_detector = Sports2DPoseDetector(
+                model_type=model_type,
+                mode=mode,
+                det_frequency=det_frequency,
+                tracking_mode=tracking_mode,
+                backend=backend,
+                device=device
+            )
+            # Use the keypoint mapping from Sports2D
+            self.keypoint_mapping = self.sports2d_detector.keypoint_mapping
+        else:
+            # Initialize MediaPipe components
+            self.mp_pose = mp.solutions.pose
+            self.mp_drawing = mp.solutions.drawing_utils
+            self.mp_drawing_styles = mp.solutions.drawing_styles
+            
+            # Initialize pose detector
+            self.pose = self.mp_pose.Pose(
+                static_image_mode=static_image_mode,
+                model_complexity=model_complexity,
+                smooth_landmarks=True,
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5
+            )
+            
+            # Initialize keypoint mapping
+            self._init_keypoint_mapping()
+            
+            # Store previous keypoints for tracking
+            self.prev_keypoints = None
+            self.frame_count = 0
+    #old init without sports2d
+    # def __init__(self, 
+    #              model_type='HALPE_26',
+    #              det_frequency=4,
+    #              tracking_mode='sports2d',
+    #              keypoint_likelihood_threshold=0.3,
+    #              average_likelihood_threshold=0.5,
+    #              keypoint_number_threshold=0.3,
+    #              static_image_mode=False,
+    #              model_complexity=1):
+    #     """
+    #     Initialize the pose detector with enhanced features.
         
-        # Initialize pose detector
-        self.pose = self.mp_pose.Pose(
-            static_image_mode=static_image_mode,
-            model_complexity=model_complexity,
-            smooth_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+    #     Args:
+    #         model_type: Type of pose model ('HALPE_26', 'COCO_133', 'COCO_17')
+    #         det_frequency: Run detection every N frames (tracking in between)
+    #         tracking_mode: 'sports2d' or 'deepsort'
+    #         keypoint_likelihood_threshold: Minimum confidence for keypoints
+    #         average_likelihood_threshold: Minimum average confidence for person
+    #         keypoint_number_threshold: Minimum fraction of keypoints detected
+    #         static_image_mode: Whether to treat input as static images
+    #         model_complexity: Model complexity (0, 1, or 2)
+    #     """
+    #     self.model_type = model_type.upper()
+    #     self.det_frequency = det_frequency
+    #     self.tracking_mode = tracking_mode
+    #     self.keypoint_likelihood_threshold = keypoint_likelihood_threshold
+    #     self.average_likelihood_threshold = average_likelihood_threshold
+    #     self.keypoint_number_threshold = keypoint_number_threshold
         
-        # Store previous keypoints for tracking
-        self.prev_keypoints = None
-        self.frame_count = 0
+    #     # Initialize MediaPipe components
+    #     self.mp_pose = mp.solutions.pose
+    #     self.mp_drawing = mp.solutions.drawing_utils
+    #     self.mp_drawing_styles = mp.solutions.drawing_styles
         
-        # Initialize keypoint mapping based on model type
-        self._init_keypoint_mapping()
+    #     # Initialize pose detector
+    #     self.pose = self.mp_pose.Pose(
+    #         static_image_mode=static_image_mode,
+    #         model_complexity=model_complexity,
+    #         smooth_landmarks=True,
+    #         min_detection_confidence=0.5,
+    #         min_tracking_confidence=0.5
+    #     )
         
-        logger.info(f"Initialized PoseDetector with model={model_type}, tracking={tracking_mode}")
+    #     # Store previous keypoints for tracking
+    #     self.prev_keypoints = None
+    #     self.frame_count = 0
+        
+    #     # Initialize keypoint mapping based on model type
+    #     self._init_keypoint_mapping()
+        
+    #     logger.info(f"Initialized PoseDetector with model={model_type}, tracking={tracking_mode}")
     
     def _init_keypoint_mapping(self):
         """Initialize keypoint mapping based on selected model."""
@@ -122,59 +197,62 @@ class PoseDetector:
         Returns:
             List of dictionaries mapping landmark indices to (x, y, z) coordinates
         """
-        self.frame_count += 1
-        h, w, _ = frame.shape
-        
-        # Only run detection every det_frequency frames
-        run_detection = (self.frame_count % self.det_frequency == 1) or (self.prev_keypoints is None)
-        
-        if run_detection:
-            # Convert to RGB for MediaPipe
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            # Process the frame with MediaPipe
-            results = self.pose.process(rgb_frame)
-            
-            if not results.pose_landmarks:
-                return []
-            
-            # Convert landmarks to our format
-            keypoints = []
-            scores = []
-            
-            # For now, MediaPipe only detects one person
-            # In a real multi-person system, we'd iterate through multiple detections
-            person_keypoints = {}
-            person_scores = np.ones(33)  # MediaPipe has 33 landmarks
-            
-            for idx, landmark in enumerate(results.pose_landmarks.landmark):
-                x = landmark.x * w
-                y = landmark.y * h
-                z = landmark.z
-                visibility = landmark.visibility if hasattr(landmark, 'visibility') else 1.0
-                
-                # Add to person's keypoints
-                person_keypoints[idx] = (x, y, z)
-                person_scores[idx] = visibility
-            
-            keypoints.append(person_keypoints)
-            scores.append(person_scores)
-            
-            # Filter keypoints and persons based on confidence thresholds
-            filtered_keypoints, filtered_scores = self._filter_detections(keypoints, scores)
-            
-            # Apply tracking
-            tracked_keypoints, tracked_scores = self._apply_tracking(filtered_keypoints, filtered_scores, frame)
-            
-            self.prev_keypoints = tracked_keypoints
-            return tracked_keypoints
-        
+        if self.use_sports2d:
+            return self.sports2d_detector.find_pose(frame)
         else:
-            # Use tracking for intermediate frames
-            return self.prev_keypoints
-    
+            self.frame_count += 1
+            h, w, _ = frame.shape
+            
+            # Only run detection every det_frequency frames
+            run_detection = (self.frame_count % self.det_frequency == 1) or (self.prev_keypoints is None)
+            
+            if run_detection:
+                # Convert to RGB for MediaPipe
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Process the frame with MediaPipe
+                results = self.pose.process(rgb_frame)
+                
+                if not results.pose_landmarks:
+                    return []
+                
+                # Convert landmarks to our format
+                keypoints = []
+                scores = []
+                
+                # For now, MediaPipe only detects one person
+                # In a real multi-person system, we'd iterate through multiple detections
+                person_keypoints = {}
+                person_scores = np.ones(33)  # MediaPipe has 33 landmarks
+                
+                for idx, landmark in enumerate(results.pose_landmarks.landmark):
+                    x = landmark.x * w
+                    y = landmark.y * h
+                    z = landmark.z
+                    visibility = landmark.visibility if hasattr(landmark, 'visibility') else 1.0
+                    
+                    # Add to person's keypoints
+                    person_keypoints[idx] = (x, y, z)
+                    person_scores[idx] = visibility
+                
+                keypoints.append(person_keypoints)
+                scores.append(person_scores)
+                
+                # Filter keypoints and persons based on confidence thresholds
+                filtered_keypoints, filtered_scores = self._filter_detections(keypoints, scores)
+                
+                # Apply tracking
+                tracked_keypoints, tracked_scores = self._apply_tracking(filtered_keypoints, filtered_scores, frame)
+                
+                self.prev_keypoints = tracked_keypoints
+                return tracked_keypoints
+            
+            else:
+                # Use tracking for intermediate frames
+                return self.prev_keypoints
+        
     def _filter_detections(self, keypoints: List[Dict[int, Tuple[float, float, float]]], 
-                          scores: List[np.ndarray]) -> Tuple[List[Dict[int, Tuple[float, float, float]]], List[np.ndarray]]:
+                        scores: List[np.ndarray]) -> Tuple[List[Dict[int, Tuple[float, float, float]]], List[np.ndarray]]:
         """
         Filter detections based on confidence thresholds.
         
@@ -205,7 +283,6 @@ class PoseDetector:
                 if np.mean(valid_scores) >= self.average_likelihood_threshold:
                     filtered_keypoints.append(valid_keypoints)
                     filtered_scores.append(person_scores)
-        
         return filtered_keypoints, filtered_scores
     
     def _apply_tracking(self, keypoints: List[Dict[int, Tuple[float, float, float]]], 
